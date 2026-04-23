@@ -535,36 +535,90 @@ else:
 
     if record_items:
         sorted_records = sorted(record_items, key=lambda item: item["datetime"], reverse=True)
-        history_df = pd.DataFrame(
-            [
-                {
-                    "日時": item["datetime"].replace("T", " "),
-                    "ポイント": item["location"],
-                    "杯数": item["count"],
-                    "胴長(cm)": item["size_cm"],
-                    "風(m/s)": item["weather"].get("wind_mps"),
-                    "波(m)": item["weather"].get("wave_m"),
-                    "水温(℃)": item["weather"].get("water_temp"),
-                    "気圧(hPa)": item["weather"].get("pressure_hpa"),
-                    "メモ": item["memo"],
-                }
-                for item in sorted_records
-            ]
-        )
-        st.dataframe(history_df, use_container_width=True, hide_index=True)
 
-        st.caption("最新の釣果写真")
-        photo_cols = st.columns(3)
-        photo_idx = 0
-        for item in sorted_records:
-            if not item.get("photo_path"):
-                continue
-            photo_file = Path(item["photo_path"])
-            if not photo_file.exists():
-                continue
-            with photo_cols[photo_idx % 3]:
-                st.image(
-                    str(photo_file),
-                    caption=f"{item['location']} {item['datetime'].replace('T', ' ')}",
+        with st.expander("ログ削除", expanded=False):
+            with st.form("delete_record_form"):
+                delete_idx = st.selectbox(
+                    "削除するログ",
+                    options=list(range(len(sorted_records))),
+                    format_func=lambda idx: (
+                        f"{sorted_records[idx]['datetime'].replace('T', ' ')} | "
+                        f"{sorted_records[idx]['location']} | "
+                        f"{sorted_records[idx]['count']}杯"
+                    ),
                 )
-            photo_idx += 1
+                delete_photo_file = st.checkbox(
+                    "このログの写真ファイルも削除する", value=True
+                )
+                submit_delete = st.form_submit_button("選択したログを削除")
+
+            if submit_delete:
+                target_record = sorted_records[delete_idx]
+                target_photo_path = target_record.get("photo_path")
+                try:
+                    record_items.remove(target_record)
+                except ValueError:
+                    st.error("削除対象のログが見つかりませんでした。")
+                else:
+                    if delete_photo_file and target_photo_path:
+                        photo_file = Path(target_photo_path)
+                        if photo_file.exists():
+                            photo_file.unlink()
+                    save_catch_records(record_items)
+                    st.success("ログを削除しました。")
+                    st.rerun()
+
+        filter_col1, filter_col2 = st.columns([1.1, 1.4])
+        with filter_col1:
+            date_filter_enabled = st.checkbox("日付で絞り込む", value=False)
+        with filter_col2:
+            filter_date = st.date_input("表示する日付", value=today, disabled=not date_filter_enabled)
+
+        if date_filter_enabled:
+            displayed_records = []
+            for item in sorted_records:
+                try:
+                    item_date = datetime.fromisoformat(item["datetime"]).date()
+                except (TypeError, ValueError):
+                    continue
+                if item_date == filter_date:
+                    displayed_records.append(item)
+        else:
+            displayed_records = sorted_records
+
+        if not displayed_records:
+            st.info("指定日の釣果ログはありません。")
+        else:
+            history_df = pd.DataFrame(
+                [
+                    {
+                        "日時": item["datetime"].replace("T", " "),
+                        "ポイント": item["location"],
+                        "杯数": item["count"],
+                        "胴長(cm)": item["size_cm"],
+                        "風(m/s)": item["weather"].get("wind_mps"),
+                        "波(m)": item["weather"].get("wave_m"),
+                        "水温(℃)": item["weather"].get("water_temp"),
+                        "気圧(hPa)": item["weather"].get("pressure_hpa"),
+                        "メモ": item["memo"],
+                    }
+                    for item in displayed_records
+                ]
+            )
+            st.dataframe(history_df, use_container_width=True, hide_index=True)
+
+            st.caption("最新の釣果写真")
+            photo_cols = st.columns(3)
+            photo_idx = 0
+            for item in displayed_records:
+                if not item.get("photo_path"):
+                    continue
+                photo_file = Path(item["photo_path"])
+                if not photo_file.exists():
+                    continue
+                with photo_cols[photo_idx % 3]:
+                    st.image(
+                        str(photo_file),
+                        caption=f"{item['location']} {item['datetime'].replace('T', ' ')}",
+                    )
+                photo_idx += 1
