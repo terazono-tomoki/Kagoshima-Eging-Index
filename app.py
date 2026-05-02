@@ -1,4 +1,4 @@
-"""Kagoshima eging condition dashboard using Open-Meteo forecast data."""
+"""Kagoshima eging condition dashboard using Open-Meteo (incl. marine sea level / tides)."""
 
 from datetime import date, datetime, time
 import json
@@ -28,27 +28,15 @@ IMAGE_DIR = Path("catch_images")
 RECORDS_SECTION_PASSWORD = st.secrets.get("records_section_password")
 
 
-def moon_age(target_date: date) -> float:
+def tide_score_from_tide_range(tide_range_m: float) -> tuple[float, str]:
     """
-    簡易月齢（0-29.53）を計算する。
-    既知の新月日を基準に周回で求める。
+    その日の海面高度（潮汐込みモデル）から求めた潮差に基づき潮スコアを返す。
+    tide_range_m は同日の hourly sea level の最大値と最小値の差（メートル）。
     """
-    known_new_moon = date(2000, 1, 6)
-    synodic_month = 29.53058867
-    diff_days = (target_date - known_new_moon).days
-    return diff_days % synodic_month
-
-
-def tide_score_from_moon(target_date: date) -> tuple[float, str]:
-    """
-    月齢から潮の動きやすさを近似し、エギング向けの潮スコアを返す。
-    大潮寄りを高めに評価。
-    """
-    age = moon_age(target_date)
-    # 新月/満月(0, 14.77, 29.53)付近で潮が動きやすい
-    distance_to_spring = min(abs(age - 0), abs(age - 14.765), abs(age - 29.53))
-    normalized = max(0.0, min(1.0, 1 - (distance_to_spring / 7.5)))
-    score = 45 + (normalized * 55)
+    # 潮差が大きいほど「大潮に近い」動きとみなす（閾値はおおよそ西南海域向けの目安）
+    ref_range_m = 1.85
+    normalized = max(0.0, min(1.0, tide_range_m / ref_range_m))
+    score = 45.0 + (normalized * 55.0)
 
     if normalized >= 0.82:
         tide_type = "大潮寄り"
@@ -131,7 +119,8 @@ def fetch_open_meteo_hourly(target_coords: list[float], target_day: date) -> pd.
         "timezone": "Asia/Tokyo",
         "start_date": day_text,
         "end_date": day_text,
-        "hourly": "wave_height,sea_surface_temperature",
+        "hourly": "wave_height,sea_surface_temperature,sea_level_height_msl",
+        "cell_selection": "sea",
     }
 
     weather_url = (
@@ -164,11 +153,14 @@ def fetch_open_meteo_hourly(target_coords: list[float], target_day: date) -> pd.
             "time": marine_hourly["time"],
             "wave_m": marine_hourly["wave_height"],
             "water_temp": marine_hourly["sea_surface_temperature"],
+            "sea_level_m": marine_hourly["sea_level_height_msl"],
         }
     )
     merged = weather_df.merge(marine_df, on="time", how="inner")
     merged["time"] = pd.to_datetime(merged["time"])
-    return merged.dropna(subset=["wind_mps", "wave_m", "water_temp", "pressure_hpa"])
+    return merged.dropna(
+        subset=["wind_mps", "wave_m", "water_temp", "pressure_hpa", "sea_level_m"]
+    )
 
 
 def get_weather_snapshot(location_name: str, target_dt: datetime) -> dict:
@@ -183,6 +175,7 @@ def get_weather_snapshot(location_name: str, target_dt: datetime) -> dict:
         "wave_m": round(float(nearest["wave_m"]), 2),
         "water_temp": round(float(nearest["water_temp"]), 1),
         "pressure_hpa": round(float(nearest["pressure_hpa"]), 1),
+        "sea_level_m": round(float(nearest["sea_level_m"]), 3),
     }
 
 
@@ -240,7 +233,8 @@ def fetch_open_meteo_daily(target_coords: list[float]) -> pd.DataFrame:
         "longitude": lon,
         "timezone": "Asia/Tokyo",
         "forecast_days": 7,
-        "hourly": "wave_height,sea_surface_temperature",
+        "hourly": "wave_height,sea_surface_temperature,sea_level_height_msl",
+        "cell_selection": "sea",
     }
 
     weather_query = urllib.parse.urlencode(weather_params)
@@ -270,6 +264,7 @@ def fetch_open_meteo_daily(target_coords: list[float]) -> pd.DataFrame:
             "time": marine_hourly["time"],
             "wave_m": marine_hourly["wave_height"],
             "water_temp": marine_hourly["sea_surface_temperature"],
+            "sea_level_m": marine_hourly["sea_level_height_msl"],
         }
     )
 
@@ -279,9 +274,14 @@ def fetch_open_meteo_daily(target_coords: list[float]) -> pd.DataFrame:
 
     merged["time"] = pd.to_datetime(merged["time"])
     merged["date"] = merged["time"].dt.date
-    merged = merged.dropna(subset=["wind_mps", "wave_m", "water_temp", "pressure_hpa"])
+    merged = merged.dropna(
+        subset=["wind_mps", "wave_m", "water_temp", "pressure_hpa", "sea_level_m"]
+    )
     if merged.empty:
         raise ValueError("有効な天候データが取得できませんでした。")
+
+    def _tide_range_m(series: pd.Series) -> float:
+        return float(series.max() - series.min())
 
     daily = (
         merged.groupby("date", as_index=False)
@@ -290,6 +290,7 @@ def fetch_open_meteo_daily(target_coords: list[float]) -> pd.DataFrame:
             wave_m=("wave_m", "mean"),
             water_temp=("water_temp", "mean"),
             pressure_hpa=("pressure_hpa", "mean"),
+            tide_range_m=("sea_level_m", _tide_range_m),
         )
         .sort_values("date")
         .head(7)
@@ -300,13 +301,14 @@ def fetch_open_meteo_daily(target_coords: list[float]) -> pd.DataFrame:
 def evaluate_eging_condition(location_name: str, target_date: date, weather_row: pd.Series) -> dict:
     """
     エギング向け総合判定:
-    - 潮の効きやすさ（月齢近似）
+    - 潮の効きやすさ（Open-Meteo 海面高度モデルからの日次潮差）
     - 風（弱いほど高評価）
     - 波（低いほど高評価）
     - 水温（16-24度を高評価）
     - 気圧安定度（急低下を避ける）
     """
-    tide_score, tide_type = tide_score_from_moon(target_date)
+    tide_range_m = float(weather_row["tide_range_m"])
+    tide_score, tide_type = tide_score_from_tide_range(tide_range_m)
 
     wind_mps = float(weather_row["wind_mps"])
     wind_score = max(0.0, 100 - (wind_mps * 9.5))
@@ -451,8 +453,8 @@ forecast_df = pd.DataFrame(
 )
 st.dataframe(forecast_df, use_container_width=True, hide_index=True)
 st.caption(
-    "※ 風速・気圧は Open-Meteo Forecast API、波高・海面水温は Open-Meteo Marine API の"
-    "無料予報データを使用しています。実釣前に最新情報を再確認してください。"
+    "※ 風速・気圧は Open-Meteo Forecast API、波高・海面水温・海面高度（潮汐を含むモデル）は "
+    "Open-Meteo Marine API の無料予報データを使用しています。実釣前に最新情報を再確認してください。"
 )
 
 st.divider()
@@ -515,6 +517,7 @@ else:
                 "wave_m": None,
                 "water_temp": None,
                 "pressure_hpa": None,
+                "sea_level_m": None,
             }
         photo_path = save_uploaded_image(squid_photo)
         record_items.append(
@@ -600,6 +603,7 @@ else:
                         "波(m)": item["weather"].get("wave_m"),
                         "水温(℃)": item["weather"].get("water_temp"),
                         "気圧(hPa)": item["weather"].get("pressure_hpa"),
+                        "海面高度(m)": item["weather"].get("sea_level_m"),
                         "メモ": item["memo"],
                     }
                     for item in displayed_records
