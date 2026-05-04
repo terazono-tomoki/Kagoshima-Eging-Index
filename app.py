@@ -28,6 +28,8 @@ locations = {
 }
 
 RECORDS_DB = _APP_ROOT / "catch_records.db"
+# sqlite3.connect に渡す（Path のままだと環境によって相性問題が出ることがある）
+RECORDS_DB_ABS = str(RECORDS_DB.resolve())
 IMAGE_DIR = _APP_ROOT / "catch_images"
 RECORDS_SECTION_PASSWORD = st.secrets.get("records_section_password")
 
@@ -96,7 +98,7 @@ def _init_catch_db(conn: sqlite3.Connection) -> None:
 
 def _ensure_catch_db() -> None:
     """Create SQLite schema for catch records if needed."""
-    conn = sqlite3.connect(RECORDS_DB)
+    conn = sqlite3.connect(RECORDS_DB_ABS)
     try:
         _init_catch_db(conn)
         conn.commit()
@@ -107,7 +109,7 @@ def _ensure_catch_db() -> None:
 def load_catch_records() -> list[dict]:
     """Load catch records from local SQLite database."""
     _ensure_catch_db()
-    conn = sqlite3.connect(RECORDS_DB)
+    conn = sqlite3.connect(RECORDS_DB_ABS)
     try:
         cur = conn.execute(
             """
@@ -145,7 +147,7 @@ def load_catch_records() -> list[dict]:
 def count_catch_records() -> int:
     """Return number of rows in catch_records (for UI when the section is locked)."""
     _ensure_catch_db()
-    conn = sqlite3.connect(RECORDS_DB)
+    conn = sqlite3.connect(RECORDS_DB_ABS)
     try:
         cur = conn.execute("SELECT COUNT(*) FROM catch_records")
         return int(cur.fetchone()[0])
@@ -156,7 +158,7 @@ def count_catch_records() -> int:
 def save_catch_records(record_list: list[dict]) -> None:
     """Replace all catch records in SQLite (same contract as the former JSON file)."""
     _ensure_catch_db()
-    conn = sqlite3.connect(RECORDS_DB)
+    conn = sqlite3.connect(RECORDS_DB_ABS)
     try:
         conn.execute("BEGIN")
         conn.execute("DELETE FROM catch_records")
@@ -645,6 +647,11 @@ else:
         st.session_state.records_auth_unlocked = False
         st.rerun()
 
+    st.caption(
+        f"SQLite の保存先は次の **1ファイル** です（DBツールで別フォルダを開いていないか確認してください）。"
+        f"\n`{RECORDS_DB_ABS}`"
+    )
+
     record_items = load_catch_records()
     record_eval_label, record_eval_text = evaluate_from_catch_records(
         current_point, today_result, record_items
@@ -697,9 +704,17 @@ else:
                 "weather": weather_snapshot,
             }
         )
-        save_catch_records(record_items)
-        st.success("釣果ログを保存しました。")
-        st.rerun()
+        try:
+            save_catch_records(record_items)
+        except OSError as exc:
+            st.error(f"ファイルへ書き込めませんでした（権限・同期・ロックの可能性）。保存先: `{RECORDS_DB_ABS}`")
+            st.exception(exc)
+        except sqlite3.Error as exc:
+            st.error("SQLiteへの保存に失敗しました。")
+            st.exception(exc)
+        else:
+            st.success(f"釣果ログを保存しました。（保存先DB: `{RECORDS_DB_ABS}`）")
+            st.rerun()
 
     if record_items:
         sorted_records = sorted(record_items, key=lambda log: log["datetime"], reverse=True)
@@ -800,9 +815,19 @@ else:
                         "photo_path": photo_stored,
                         "weather": weather_snapshot,
                     }
-                    save_catch_records(record_items)
-                    st.success("ログを更新しました。")
-                    st.rerun()
+                    try:
+                        save_catch_records(record_items)
+                    except OSError as exc:
+                        st.error(
+                            f"ファイルへ書き込めませんでした。保存先: `{RECORDS_DB_ABS}`"
+                        )
+                        st.exception(exc)
+                    except sqlite3.Error as exc:
+                        st.error("SQLiteへの保存に失敗しました。")
+                        st.exception(exc)
+                    else:
+                        st.success("ログを更新しました。")
+                        st.rerun()
 
         with st.expander("ログ削除", expanded=False):
             with st.form("delete_record_form"):
@@ -832,9 +857,19 @@ else:
                         photo_file = Path(target_photo_path)
                         if photo_file.exists():
                             photo_file.unlink()
-                    save_catch_records(record_items)
-                    st.success("ログを削除しました。")
-                    st.rerun()
+                    try:
+                        save_catch_records(record_items)
+                    except OSError as exc:
+                        st.error(
+                            f"ファイルへ書き込めませんでした。保存先: `{RECORDS_DB_ABS}`"
+                        )
+                        st.exception(exc)
+                    except sqlite3.Error as exc:
+                        st.error("SQLiteへの保存に失敗しました。")
+                        st.exception(exc)
+                    else:
+                        st.success("ログを削除しました。")
+                        st.rerun()
 
         filter_col1, filter_col2 = st.columns([1.1, 1.4])
         with filter_col1:
