@@ -114,8 +114,8 @@ def load_catch_records() -> list[dict]:
             """
         )
         result: list[dict] = []
-        for row in cur.fetchall():
-            rid, location, dt, size_cm, count, memo, photo_path, weather_json = row
+        for db_row in cur.fetchall():
+            rid_val, loc_val, dt_val, size_val, cnt_val, memo_val, path_val, weather_json = db_row
             try:
                 weather = json.loads(weather_json) if weather_json else {}
             except json.JSONDecodeError:
@@ -124,13 +124,13 @@ def load_catch_records() -> list[dict]:
                 weather = {}
             result.append(
                 {
-                    "id": rid,
-                    "location": location,
-                    "datetime": dt,
-                    "size_cm": size_cm,
-                    "count": count,
-                    "memo": memo or "",
-                    "photo_path": photo_path,
+                    "id": rid_val,
+                    "location": loc_val,
+                    "datetime": dt_val,
+                    "size_cm": size_val,
+                    "count": cnt_val,
+                    "memo": memo_val or "",
+                    "photo_path": path_val,
                     "weather": weather,
                 }
             )
@@ -146,9 +146,9 @@ def save_catch_records(record_list: list[dict]) -> None:
     try:
         conn.execute("BEGIN")
         conn.execute("DELETE FROM catch_records")
-        for rec in record_list:
-            rid = rec.get("id") or uuid.uuid4().hex
-            weather = rec.get("weather")
+        for stored in record_list:
+            row_id = stored.get("id") or uuid.uuid4().hex
+            weather = stored.get("weather")
             if not isinstance(weather, dict):
                 weather = {}
             conn.execute(
@@ -158,13 +158,13 @@ def save_catch_records(record_list: list[dict]) -> None:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    rid,
-                    rec["location"],
-                    rec["datetime"],
-                    float(rec["size_cm"]),
-                    int(rec["count"]),
-                    rec.get("memo", "") or "",
-                    rec.get("photo_path"),
+                    row_id,
+                    stored["location"],
+                    stored["datetime"],
+                    float(stored["size_cm"]),
+                    int(stored["count"]),
+                    stored.get("memo", "") or "",
+                    stored.get("photo_path"),
                     json.dumps(weather, ensure_ascii=False),
                 ),
             )
@@ -189,6 +189,26 @@ def save_uploaded_image(uploaded_file) -> str | None:
     return str(file_path.as_posix())
 
 
+def _photo_path_after_edit(uploaded, delete_flag: bool, previous: dict) -> str | None:
+    """Resolve stored photo path after the user edits or removes the image."""
+    if uploaded:
+        new_path = save_uploaded_image(uploaded)
+        old_p = previous.get("photo_path")
+        if old_p:
+            op = Path(old_p)
+            if op.exists():
+                op.unlink()
+        return new_path
+    if delete_flag:
+        old_p = previous.get("photo_path")
+        if old_p:
+            op = Path(old_p)
+            if op.exists():
+                op.unlink()
+        return None
+    return previous.get("photo_path")
+
+
 def parse_record_datetime(record: dict) -> datetime:
     """Parse ISO datetime from a catch record; fallback if missing or invalid."""
     raw = record.get("datetime")
@@ -200,21 +220,21 @@ def parse_record_datetime(record: dict) -> datetime:
         return datetime.combine(date.today(), time(20, 0))
 
 
-def index_of_record_in_store(record_items: list[dict], record: dict) -> int:
+def index_of_record_in_store(store: list[dict], record: dict) -> int:
     """Find index of a record in the persisted list (by id, identity, or datetime+location)."""
-    rid = record.get("id")
-    if rid:
-        for i, item in enumerate(record_items):
-            if item.get("id") == rid:
+    rec_id = record.get("id")
+    if rec_id:
+        for i, entry in enumerate(store):
+            if entry.get("id") == rec_id:
                 return i
-    for i, item in enumerate(record_items):
-        if item is record:
+    for i, entry in enumerate(store):
+        if entry is record:
             return i
     dt_key = record.get("datetime")
     loc_key = record.get("location")
     if dt_key is not None and loc_key is not None:
-        for i, item in enumerate(record_items):
-            if item.get("datetime") == dt_key and item.get("location") == loc_key:
+        for i, entry in enumerate(store):
+            if entry.get("datetime") == dt_key and entry.get("location") == loc_key:
                 return i
     return -1
 
@@ -302,7 +322,7 @@ def evaluate_from_catch_records(
     location_name: str, today_data: dict, record_list: list[dict]
 ) -> tuple[str, str]:
     """Evaluate today's fishability based on past catch-condition similarity."""
-    target_records = [item for item in record_list if item["location"] == location_name]
+    target_records = [entry for entry in record_list if entry["location"] == location_name]
     if len(target_records) < 2:
         return "データ不足", "釣果ログが2件以上あると実績ベース評価が有効になります。"
 
@@ -477,9 +497,9 @@ def weekly_forecast(location_name: str, days: int = 7) -> list[dict]:
     location_coords = locations[location_name]
     daily_weather = fetch_open_meteo_daily(location_coords)
     results = []
-    for _, row in daily_weather.head(days).iterrows():
-        target = row["date"]
-        results.append(evaluate_eging_condition(location_name, target, row))
+    for _, wrow in daily_weather.head(days).iterrows():
+        target = wrow["date"]
+        results.append(evaluate_eging_condition(location_name, target, wrow))
     return results
 
 
@@ -504,7 +524,7 @@ with col_left:
         try:
             location_forecast = weekly_forecast(name, days=7)
             eval_today = next(
-                (item for item in location_forecast if item["date"] == today),
+                (fc for fc in location_forecast if fc["date"] == today),
                 location_forecast[0],
             )
         except (urllib.error.URLError, TimeoutError, ValueError, KeyError):
@@ -536,7 +556,7 @@ except (urllib.error.URLError, TimeoutError, ValueError, KeyError) as error:
     st.exception(error)
     st.stop()
 
-today_result = next((item for item in forecast if item["date"] == today), forecast[0])
+today_result = next((fc for fc in forecast if fc["date"] == today), forecast[0])
 
 with col_right:
     st.subheader("指定したポイントの評価")
@@ -557,17 +577,17 @@ st.subheader("本日から1週間の予測")
 forecast_df = pd.DataFrame(
     [
         {
-            "日付": item["date"].strftime("%m/%d"),
-            "ポイント": item["location"],
-            "ランク": item["rank"],
-            "総合スコア": item["total_score"],
-            "潮傾向": item["tide_type"],
-            "風(m/s)": item["wind_mps"],
-            "波(m)": item["wave_m"],
-            "水温(℃)": item["water_temp"],
-            "気圧(hPa)": item["pressure_hpa"],
+            "日付": fc["date"].strftime("%m/%d"),
+            "ポイント": fc["location"],
+            "ランク": fc["rank"],
+            "総合スコア": fc["total_score"],
+            "潮傾向": fc["tide_type"],
+            "風(m/s)": fc["wind_mps"],
+            "波(m)": fc["wave_m"],
+            "水温(℃)": fc["water_temp"],
+            "気圧(hPa)": fc["pressure_hpa"],
         }
-        for item in forecast
+        for fc in forecast
     ]
 )
 st.dataframe(forecast_df, use_container_width=True, hide_index=True)
@@ -656,7 +676,7 @@ else:
         st.rerun()
 
     if record_items:
-        sorted_records = sorted(record_items, key=lambda item: item["datetime"], reverse=True)
+        sorted_records = sorted(record_items, key=lambda log: log["datetime"], reverse=True)
 
         with st.expander("ログ編集", expanded=False):
             with st.form("edit_record_form"):
@@ -740,33 +760,18 @@ else:
                             "sea_level_m": None,
                         }
                     old = record_items[store_idx]
-                    if ed_photo:
-                        new_path = save_uploaded_image(ed_photo)
-                        old_p = old.get("photo_path")
-                        if old_p:
-                            op = Path(old_p)
-                            if op.exists():
-                                op.unlink()
-                        final_photo = new_path
-                    elif delete_photo_on_edit:
-                        old_p = old.get("photo_path")
-                        if old_p:
-                            op = Path(old_p)
-                            if op.exists():
-                                op.unlink()
-                        final_photo = None
-                    else:
-                        final_photo = old.get("photo_path")
-
-                    rid = old.get("id") or uuid.uuid4().hex
+                    photo_stored = _photo_path_after_edit(
+                        ed_photo, delete_photo_on_edit, old
+                    )
+                    record_id = old.get("id") or uuid.uuid4().hex
                     record_items[store_idx] = {
-                        "id": rid,
+                        "id": record_id,
                         "location": ed_location,
                         "datetime": catch_dt.isoformat(timespec="minutes"),
                         "size_cm": float(ed_size),
                         "count": int(ed_count),
                         "memo": ed_memo.strip(),
-                        "photo_path": final_photo,
+                        "photo_path": photo_stored,
                         "weather": weather_snapshot,
                     }
                     save_catch_records(record_items)
@@ -813,13 +818,13 @@ else:
 
         if date_filter_enabled:
             displayed_records = []
-            for item in sorted_records:
+            for log in sorted_records:
                 try:
-                    item_date = datetime.fromisoformat(item["datetime"]).date()
+                    log_date = datetime.fromisoformat(log["datetime"]).date()
                 except (TypeError, ValueError):
                     continue
-                if item_date == filter_date:
-                    displayed_records.append(item)
+                if log_date == filter_date:
+                    displayed_records.append(log)
         else:
             displayed_records = sorted_records
 
@@ -829,18 +834,18 @@ else:
             history_df = pd.DataFrame(
                 [
                     {
-                        "日時": item["datetime"].replace("T", " "),
-                        "ポイント": item["location"],
-                        "杯数": item["count"],
-                        "胴長(cm)": item["size_cm"],
-                        "風(m/s)": item["weather"].get("wind_mps"),
-                        "波(m)": item["weather"].get("wave_m"),
-                        "水温(℃)": item["weather"].get("water_temp"),
-                        "気圧(hPa)": item["weather"].get("pressure_hpa"),
-                        "海面高度(m)": item["weather"].get("sea_level_m"),
-                        "メモ": item["memo"],
+                        "日時": hist["datetime"].replace("T", " "),
+                        "ポイント": hist["location"],
+                        "杯数": hist["count"],
+                        "胴長(cm)": hist["size_cm"],
+                        "風(m/s)": hist["weather"].get("wind_mps"),
+                        "波(m)": hist["weather"].get("wave_m"),
+                        "水温(℃)": hist["weather"].get("water_temp"),
+                        "気圧(hPa)": hist["weather"].get("pressure_hpa"),
+                        "海面高度(m)": hist["weather"].get("sea_level_m"),
+                        "メモ": hist["memo"],
                     }
-                    for item in displayed_records
+                    for hist in displayed_records
                 ]
             )
             st.dataframe(history_df, use_container_width=True, hide_index=True)
@@ -848,15 +853,15 @@ else:
             st.caption("最新の釣果写真")
             photo_cols = st.columns(3)
             photo_idx = 0
-            for item in displayed_records:
-                if not item.get("photo_path"):
+            for hist in displayed_records:
+                if not hist.get("photo_path"):
                     continue
-                photo_file = Path(item["photo_path"])
+                photo_file = Path(hist["photo_path"])
                 if not photo_file.exists():
                     continue
                 with photo_cols[photo_idx % 3]:
                     st.image(
                         str(photo_file),
-                        caption=f"{item['location']} {item['datetime'].replace('T', ' ')}",
+                        caption=f"{hist['location']} {hist['datetime'].replace('T', ' ')}",
                     )
                 photo_idx += 1
