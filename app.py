@@ -10,6 +10,9 @@ import urllib.request
 import uuid
 
 import folium
+
+# DB・画像はカレントディレクトリではなくこのファイルと同じフォルダに固定する
+_APP_ROOT = Path(__file__).resolve().parent
 import pandas as pd
 import streamlit as st
 from streamlit_folium import st_folium
@@ -24,8 +27,8 @@ locations = {
     "佐多岬": [30.994, 130.660],
 }
 
-RECORDS_DB = Path("catch_records.db")
-IMAGE_DIR = Path("catch_images")
+RECORDS_DB = _APP_ROOT / "catch_records.db"
+IMAGE_DIR = _APP_ROOT / "catch_images"
 RECORDS_SECTION_PASSWORD = st.secrets.get("records_section_password")
 
 
