@@ -100,6 +100,36 @@ def save_uploaded_image(uploaded_file) -> str | None:
     return str(file_path.as_posix())
 
 
+def parse_record_datetime(record: dict) -> datetime:
+    """Parse ISO datetime from a catch record; fallback if missing or invalid."""
+    raw = record.get("datetime")
+    if not raw:
+        return datetime.combine(date.today(), time(20, 0))
+    try:
+        return datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return datetime.combine(date.today(), time(20, 0))
+
+
+def index_of_record_in_store(record_items: list[dict], record: dict) -> int:
+    """Find index of a record in the persisted list (by id, identity, or datetime+location)."""
+    rid = record.get("id")
+    if rid:
+        for i, item in enumerate(record_items):
+            if item.get("id") == rid:
+                return i
+    for i, item in enumerate(record_items):
+        if item is record:
+            return i
+    dt_key = record.get("datetime")
+    loc_key = record.get("location")
+    if dt_key is not None and loc_key is not None:
+        for i, item in enumerate(record_items):
+            if item.get("datetime") == dt_key and item.get("location") == loc_key:
+                return i
+    return -1
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_open_meteo_hourly(target_coords: list[float], target_day: date) -> pd.DataFrame:
     """Fetch one day hourly weather/marine values from Open-Meteo."""
@@ -538,6 +568,121 @@ else:
 
     if record_items:
         sorted_records = sorted(record_items, key=lambda item: item["datetime"], reverse=True)
+
+        with st.expander("ログ編集", expanded=False):
+            with st.form("edit_record_form"):
+                edit_idx = st.selectbox(
+                    "編集するログ",
+                    options=list(range(len(sorted_records))),
+                    format_func=lambda idx: (
+                        f"{sorted_records[idx]['datetime'].replace('T', ' ')} | "
+                        f"{sorted_records[idx]['location']} | "
+                        f"{sorted_records[idx].get('count', '?')}杯"
+                    ),
+                )
+                rec_before = sorted_records[edit_idx]
+                dt_parsed = parse_record_datetime(rec_before)
+                loc_keys = list(locations.keys())
+                loc_index = (
+                    loc_keys.index(rec_before["location"])
+                    if rec_before.get("location") in locations
+                    else 0
+                )
+                ed_location = st.selectbox(
+                    "釣れたポイント", loc_keys, index=loc_index, key=f"ed_loc_{edit_idx}"
+                )
+                ed_date = st.date_input(
+                    "釣れた日", value=dt_parsed.date(), key=f"ed_date_{edit_idx}"
+                )
+                ed_time = st.time_input(
+                    "釣れた時刻", value=dt_parsed.time(), key=f"ed_time_{edit_idx}"
+                )
+                ed_size = st.number_input(
+                    "胴長(cm)",
+                    min_value=5.0,
+                    max_value=70.0,
+                    value=float(rec_before.get("size_cm", 20.0)),
+                    step=0.5,
+                    key=f"ed_size_{edit_idx}",
+                )
+                ed_count = st.number_input(
+                    "杯数",
+                    min_value=1,
+                    max_value=30,
+                    value=int(rec_before.get("count", 1)),
+                    step=1,
+                    key=f"ed_count_{edit_idx}",
+                )
+                ed_memo = st.text_area(
+                    "メモ",
+                    value=rec_before.get("memo", ""),
+                    placeholder="ヒットエギ・レンジ・潮位など",
+                    key=f"ed_memo_{edit_idx}",
+                )
+                existing_photo = rec_before.get("photo_path")
+                if existing_photo and Path(existing_photo).exists():
+                    st.caption(f"現在の写真: {existing_photo}")
+                ed_photo = st.file_uploader(
+                    "新しい写真に差し替え（未選択ならそのまま）",
+                    type=["jpg", "jpeg", "png", "webp"],
+                    key=f"ed_photo_{edit_idx}",
+                )
+                delete_photo_on_edit = st.checkbox(
+                    "写真を削除する（ファイルも削除）",
+                    value=False,
+                    key=f"ed_delphoto_{edit_idx}",
+                )
+                submit_edit = st.form_submit_button("この内容で更新")
+
+            if submit_edit:
+                store_idx = index_of_record_in_store(record_items, rec_before)
+                if store_idx < 0:
+                    st.error("更新対象のログが見つかりませんでした。")
+                else:
+                    catch_dt = datetime.combine(ed_date, ed_time)
+                    try:
+                        weather_snapshot = get_weather_snapshot(ed_location, catch_dt)
+                    except (urllib.error.URLError, TimeoutError, ValueError, KeyError):
+                        weather_snapshot = {
+                            "wind_mps": None,
+                            "wave_m": None,
+                            "water_temp": None,
+                            "pressure_hpa": None,
+                            "sea_level_m": None,
+                        }
+                    old = record_items[store_idx]
+                    if ed_photo:
+                        new_path = save_uploaded_image(ed_photo)
+                        old_p = old.get("photo_path")
+                        if old_p:
+                            op = Path(old_p)
+                            if op.exists():
+                                op.unlink()
+                        final_photo = new_path
+                    elif delete_photo_on_edit:
+                        old_p = old.get("photo_path")
+                        if old_p:
+                            op = Path(old_p)
+                            if op.exists():
+                                op.unlink()
+                        final_photo = None
+                    else:
+                        final_photo = old.get("photo_path")
+
+                    rid = old.get("id") or uuid.uuid4().hex
+                    record_items[store_idx] = {
+                        "id": rid,
+                        "location": ed_location,
+                        "datetime": catch_dt.isoformat(timespec="minutes"),
+                        "size_cm": float(ed_size),
+                        "count": int(ed_count),
+                        "memo": ed_memo.strip(),
+                        "photo_path": final_photo,
+                        "weather": weather_snapshot,
+                    }
+                    save_catch_records(record_items)
+                    st.success("ログを更新しました。")
+                    st.rerun()
 
         with st.expander("ログ削除", expanded=False):
             with st.form("delete_record_form"):
