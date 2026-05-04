@@ -110,6 +110,6 @@ Open-Meteo が返す「その地点の海面の高さ（潮汐を含むモデル
 
 ### 4. ローカル保存・認証
 
-- 釣果は `catch_records.json`、写真は `catch_images/` に保存
+- 釣果は SQLite の `catch_records.db`（テーブル `catch_records`）、気象スナップショットは列 `weather_json`（TEXT 内の JSON）に保存。写真は `catch_images/` に保存
 - 記録欄の閲覧・保存は `.streamlit/secrets.toml` の `records_section_password` で制限可能
 

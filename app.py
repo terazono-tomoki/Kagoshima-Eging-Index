@@ -3,6 +3,7 @@
 from datetime import date, datetime, time
 import json
 from pathlib import Path
+import sqlite3
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -23,7 +24,7 @@ locations = {
     "佐多岬": [30.994, 130.660],
 }
 
-RECORDS_FILE = Path("catch_records.json")
+RECORDS_DB = Path("catch_records.db")
 IMAGE_DIR = Path("catch_images")
 RECORDS_SECTION_PASSWORD = st.secrets.get("records_section_password")
 
@@ -73,18 +74,106 @@ def rank_color(rank: str) -> str:
     }.get(rank, "blue")
 
 
+def _init_catch_db(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS catch_records (
+            id TEXT PRIMARY KEY NOT NULL,
+            location TEXT NOT NULL,
+            datetime TEXT NOT NULL,
+            size_cm REAL NOT NULL,
+            count INTEGER NOT NULL,
+            memo TEXT NOT NULL DEFAULT '',
+            photo_path TEXT,
+            weather_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+
+
+def _ensure_catch_db() -> None:
+    """Create SQLite schema for catch records if needed."""
+    conn = sqlite3.connect(RECORDS_DB)
+    try:
+        _init_catch_db(conn)
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def load_catch_records() -> list[dict]:
-    """Load catch records from local JSON file."""
-    if not RECORDS_FILE.exists():
-        return []
-    with RECORDS_FILE.open("r", encoding="utf-8") as file:
-        return json.load(file)
+    """Load catch records from local SQLite database."""
+    _ensure_catch_db()
+    conn = sqlite3.connect(RECORDS_DB)
+    try:
+        cur = conn.execute(
+            """
+            SELECT id, location, datetime, size_cm, count, memo, photo_path, weather_json
+            FROM catch_records
+            ORDER BY datetime ASC
+            """
+        )
+        result: list[dict] = []
+        for row in cur.fetchall():
+            rid, location, dt, size_cm, count, memo, photo_path, weather_json = row
+            try:
+                weather = json.loads(weather_json) if weather_json else {}
+            except json.JSONDecodeError:
+                weather = {}
+            if not isinstance(weather, dict):
+                weather = {}
+            result.append(
+                {
+                    "id": rid,
+                    "location": location,
+                    "datetime": dt,
+                    "size_cm": size_cm,
+                    "count": count,
+                    "memo": memo or "",
+                    "photo_path": photo_path,
+                    "weather": weather,
+                }
+            )
+        return result
+    finally:
+        conn.close()
 
 
 def save_catch_records(record_list: list[dict]) -> None:
-    """Save catch records into local JSON file."""
-    with RECORDS_FILE.open("w", encoding="utf-8") as file:
-        json.dump(record_list, file, ensure_ascii=False, indent=2)
+    """Replace all catch records in SQLite (same contract as the former JSON file)."""
+    _ensure_catch_db()
+    conn = sqlite3.connect(RECORDS_DB)
+    try:
+        conn.execute("BEGIN")
+        conn.execute("DELETE FROM catch_records")
+        for rec in record_list:
+            rid = rec.get("id") or uuid.uuid4().hex
+            weather = rec.get("weather")
+            if not isinstance(weather, dict):
+                weather = {}
+            conn.execute(
+                """
+                INSERT INTO catch_records
+                (id, location, datetime, size_cm, count, memo, photo_path, weather_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    rid,
+                    rec["location"],
+                    rec["datetime"],
+                    float(rec["size_cm"]),
+                    int(rec["count"]),
+                    rec.get("memo", "") or "",
+                    rec.get("photo_path"),
+                    json.dumps(weather, ensure_ascii=False),
+                ),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def save_uploaded_image(uploaded_file) -> str | None:
