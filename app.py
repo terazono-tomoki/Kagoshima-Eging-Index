@@ -10,12 +10,12 @@ import urllib.request
 import uuid
 
 import folium
-
-# DB・画像はカレントディレクトリではなくこのファイルと同じフォルダに固定する
-_APP_ROOT = Path(__file__).resolve().parent
 import pandas as pd
 import streamlit as st
 from streamlit_folium import st_folium
+
+# DB・画像はカレントディレクトリではなくこのファイルと同じフォルダに固定する
+_APP_ROOT = Path(__file__).resolve().parent
 
 st.set_page_config(page_title="鹿児島エギング指数", layout="wide")
 st.title("鹿児島エギング指数マップ 🎣")
@@ -138,6 +138,17 @@ def load_catch_records() -> list[dict]:
                 }
             )
         return result
+    finally:
+        conn.close()
+
+
+def count_catch_records() -> int:
+    """Return number of rows in catch_records (for UI when the section is locked)."""
+    _ensure_catch_db()
+    conn = sqlite3.connect(RECORDS_DB)
+    try:
+        cur = conn.execute("SELECT COUNT(*) FROM catch_records")
+        return int(cur.fetchone()[0])
     finally:
         conn.close()
 
@@ -606,8 +617,20 @@ if not RECORDS_SECTION_PASSWORD:
         "記録欄パスワードが未設定です。"
         ".streamlit/secrets.toml に records_section_password を設定してください。"
     )
+    _n_saved = count_catch_records()
+    if _n_saved:
+        st.info(
+            f"SQLite（{RECORDS_DB.name}）には釣果が **{_n_saved} 件**保存されています。"
+            "一覧や編集を表示するには、上記のとおりパスワードを設定し、記録欄にログインしてください。"
+        )
 elif not st.session_state.get("records_auth_unlocked"):
     st.caption("釣果の閲覧・保存にはパスワードが必要です。")
+    _n_saved = count_catch_records()
+    if _n_saved:
+        st.info(
+            f"保存済みの釣果は **{_n_saved} 件**です。"
+            "下のフォームでログインすると一覧・編集・削除ができます。"
+        )
     with st.form("records_auth_form"):
         gate_pw = st.text_input("パスワード", type="password")
         gate_submit = st.form_submit_button("ログイン")
