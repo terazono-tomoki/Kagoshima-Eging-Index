@@ -19,7 +19,7 @@ _APP_ROOT = Path(__file__).resolve().parent
 
 st.set_page_config(page_title="鹿児島エギング指数", layout="wide")
 st.title("鹿児島エギング指数マップ 🎣")
-st.caption("鹿児島の主要ポイントを対象に、エギング向けの釣りやすさを独自ロジックで判定します。")
+st.caption("選択したポイントを対象に、エギング向けの釣りやすさを独自ロジックで判定します。")
 
 # 対象地点の座標（2地点のみ）
 locations = {
@@ -647,11 +647,6 @@ else:
         st.session_state.records_auth_unlocked = False
         st.rerun()
 
-    st.caption(
-        f"SQLite の保存先は次の **1ファイル** です（DBツールで別フォルダを開いていないか確認してください）。"
-        f"\n`{RECORDS_DB_ABS}`"
-    )
-
     record_items = load_catch_records()
     record_eval_label, record_eval_text = evaluate_from_catch_records(
         current_point, today_result, record_items
@@ -707,13 +702,13 @@ else:
         try:
             save_catch_records(record_items)
         except OSError as exc:
-            st.error(f"ファイルへ書き込めませんでした（権限・同期・ロックの可能性）。保存先: `{RECORDS_DB_ABS}`")
+            st.error("ファイルへ書き込めませんでした（権限・同期・ロックの可能性）。")
             st.exception(exc)
         except sqlite3.Error as exc:
             st.error("SQLiteへの保存に失敗しました。")
             st.exception(exc)
         else:
-            st.success(f"釣果ログを保存しました。（保存先DB: `{RECORDS_DB_ABS}`）")
+            st.success("釣果ログを保存しました。")
             st.rerun()
 
     if record_items:
@@ -818,9 +813,7 @@ else:
                     try:
                         save_catch_records(record_items)
                     except OSError as exc:
-                        st.error(
-                            f"ファイルへ書き込めませんでした。保存先: `{RECORDS_DB_ABS}`"
-                        )
+                        st.error("ファイルへ書き込めませんでした。")
                         st.exception(exc)
                     except sqlite3.Error as exc:
                         st.error("SQLiteへの保存に失敗しました。")
@@ -860,9 +853,7 @@ else:
                     try:
                         save_catch_records(record_items)
                     except OSError as exc:
-                        st.error(
-                            f"ファイルへ書き込めませんでした。保存先: `{RECORDS_DB_ABS}`"
-                        )
+                        st.error("ファイルへ書き込めませんでした。")
                         st.exception(exc)
                     except sqlite3.Error as exc:
                         st.error("SQLiteへの保存に失敗しました。")
