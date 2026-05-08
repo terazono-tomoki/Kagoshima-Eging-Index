@@ -47,6 +47,7 @@ def _photo_storage_enabled() -> bool:
 @st.cache_resource
 def _s3_photo_client():
     import boto3
+    from botocore.config import Config
 
     endpoint_raw = st.secrets.get("photo_storage_s3_endpoint_url")
     endpoint = str(endpoint_raw).strip() if endpoint_raw else ""
@@ -58,6 +59,7 @@ def _s3_photo_client():
         aws_access_key_id=st.secrets["photo_storage_s3_access_key"],
         aws_secret_access_key=st.secrets["photo_storage_s3_secret_key"],
         region_name=region or "auto",
+        config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
     )
 
 
