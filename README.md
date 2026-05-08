@@ -108,8 +108,13 @@ Open-Meteo が返す「その地点の海面の高さ（潮汐を含むモデル
 
 重み・`4.2`・閾値の数字は、機械学習で最適化したものではなく **決め打ちの目安**です。
 
-### 4. ローカル保存・認証
+### 4. 保存・認証（ローカル / Streamlit Cloud）
 
-- 釣果は SQLite の `catch_records.db`（テーブル `catch_records`）、気象スナップショットは列 `weather_json`（TEXT 内の JSON）に保存。写真は `catch_images/` に保存
-- 記録欄の閲覧・保存は `.streamlit/secrets.toml` の `records_section_password` で制限可能
+- **ローカル（既定）**: 釣果は SQLite の `catch_records.db`（テーブル `catch_records`）、気象スナップショットは列 `weather_json`（TEXT 内の JSON）。写真は `catch_images/`。
+- **Streamlit Cloud などディスクが永続しない環境**: Secrets に **`catch_records_database_url`**（PostgreSQL、`postgresql://...`）を設定。未設定ならローカル SQLite。
+- **写真の永続化（任意・S3 互換）**: 次を設定すると、アップロード画像がオブジェクトストレージに保存される（AWS S3 / Cloudflare R2 など）。
+  - **必須**: `photo_storage_s3_bucket`, `photo_storage_s3_access_key`, `photo_storage_s3_secret_key`
+  - **任意**: `photo_storage_s3_endpoint_url`（R2 では必須に近い）、`photo_storage_s3_region`（未設定時は `auto`）、`photo_storage_public_base_url`（公開バケット／CDN のベース URL。末尾スラッシュなし。未設定時は表示にプリサインド URL を使用）
+- DB に保存されるのは `s3key:catch_images/ファイル名` 形式の参照（公開 URL は DB に保存しない）。
+- 記録欄の閲覧・保存は **`records_section_password`** で制限可能。
 

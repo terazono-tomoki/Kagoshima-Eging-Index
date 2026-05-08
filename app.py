@@ -2,8 +2,8 @@
 
 from datetime import date, datetime, time
 import json
+import mimetypes
 from pathlib import Path
-import sqlite3
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -11,6 +11,9 @@ import uuid
 
 import folium
 import pandas as pd
+from botocore.exceptions import ClientError
+from sqlalchemy import create_engine, text
+from sqlalchemy.exc import SQLAlchemyError
 import streamlit as st
 from streamlit_folium import st_folium
 
@@ -28,10 +31,108 @@ locations = {
 }
 
 RECORDS_DB = _APP_ROOT / "catch_records.db"
-# sqlite3.connect に渡す（Path のままだと環境によって相性問題が出ることがある）
+# sqlalchemy の sqlite URL 用（バックスラッシュは URL では避ける）
 RECORDS_DB_ABS = str(RECORDS_DB.resolve())
 IMAGE_DIR = _APP_ROOT / "catch_images"
 RECORDS_SECTION_PASSWORD = st.secrets.get("records_section_password")
+
+# リモート保存時は DB の photo_path に "s3key:bucket内キー" を保存する（公開URLは保存しない）
+_REMOTE_PHOTO_PREFIX = "s3key:"
+
+
+def _photo_storage_enabled() -> bool:
+    """Secrets に S3 互換ストレージの必須項目がそろっているとき True。"""
+    b = st.secrets.get("photo_storage_s3_bucket")
+    ak = st.secrets.get("photo_storage_s3_access_key")
+    sk = st.secrets.get("photo_storage_s3_secret_key")
+    return bool(b and ak and sk)
+
+
+@st.cache_resource
+def _s3_photo_client():
+    import boto3
+
+    endpoint_raw = st.secrets.get("photo_storage_s3_endpoint_url")
+    endpoint = str(endpoint_raw).strip() if endpoint_raw else ""
+    region_raw = st.secrets.get("photo_storage_s3_region")
+    region = str(region_raw).strip() if region_raw else "auto"
+    return boto3.client(
+        "s3",
+        endpoint_url=endpoint or None,
+        aws_access_key_id=st.secrets["photo_storage_s3_access_key"],
+        aws_secret_access_key=st.secrets["photo_storage_s3_secret_key"],
+        region_name=region or "auto",
+    )
+
+
+def delete_stored_photo(stored: str | None) -> None:
+    """ローカルファイルまたはリモートオブジェクトを削除する（失敗しても例外は握りつぶす）。"""
+    if not stored:
+        return
+    if stored.startswith(_REMOTE_PHOTO_PREFIX):
+        if not _photo_storage_enabled():
+            return
+        key = stored[len(_REMOTE_PHOTO_PREFIX) :]
+        bucket = str(st.secrets["photo_storage_s3_bucket"]).strip()
+        try:
+            _s3_photo_client().delete_object(Bucket=bucket, Key=key)
+        except ClientError:
+            pass
+        return
+    if stored.startswith(("http://", "https://")):
+        return
+    p = Path(stored)
+    if p.exists():
+        p.unlink()
+
+
+def photo_display_url(stored: str | None) -> str | None:
+    """st.image に渡すパスまたは HTTPS URL。表示できないときは None。"""
+    if not stored:
+        return None
+    if stored.startswith(("http://", "https://")):
+        return stored
+    if stored.startswith(_REMOTE_PHOTO_PREFIX):
+        if not _photo_storage_enabled():
+            return None
+        key = stored[len(_REMOTE_PHOTO_PREFIX) :]
+        bucket = str(st.secrets["photo_storage_s3_bucket"]).strip()
+        pub_raw = st.secrets.get("photo_storage_public_base_url")
+        pub = str(pub_raw).strip().rstrip("/") if pub_raw else ""
+        if pub:
+            return f"{pub}/{key}"
+        return _s3_photo_client().generate_presigned_url(
+            "get_object",
+            Params={"Bucket": bucket, "Key": key},
+            ExpiresIn=3600,
+        )
+    p = Path(stored)
+    return str(p) if p.exists() else None
+
+
+def _catch_records_database_url() -> str | None:
+    """Streamlit Secrets にあるときのみリモート DB（例: Neon / Supabase の PostgreSQL）を使う。"""
+    raw = st.secrets.get("catch_records_database_url")
+    if raw is None:
+        return None
+    url = str(raw).strip()
+    return url or None
+
+
+def catch_records_storage_hint() -> str:
+    """UI 向けの保存先の短文。"""
+    if _catch_records_database_url():
+        return "リモートデータベース（Secrets の catch_records_database_url）"
+    return f"ローカル SQLite（{RECORDS_DB.name}）"
+
+
+@st.cache_resource
+def _catch_records_engine():
+    remote = _catch_records_database_url()
+    if remote:
+        return create_engine(remote, pool_pre_ping=True)
+    sqlite_url_path = RECORDS_DB_ABS.replace("\\", "/")
+    return create_engine(f"sqlite:///{sqlite_url_path}", pool_pre_ping=True)
 
 
 def tide_score_from_tide_range(tide_range_m: float) -> tuple[float, str]:
@@ -79,44 +180,40 @@ def rank_color(rank: str) -> str:
     }.get(rank, "blue")
 
 
-def _init_catch_db(conn: sqlite3.Connection) -> None:
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS catch_records (
-            id TEXT PRIMARY KEY NOT NULL,
-            location TEXT NOT NULL,
-            datetime TEXT NOT NULL,
-            size_cm REAL NOT NULL,
-            count INTEGER NOT NULL,
-            memo TEXT NOT NULL DEFAULT '',
-            photo_path TEXT,
-            weather_json TEXT NOT NULL DEFAULT '{}'
-        )
-        """
-    )
+_CATCH_RECORDS_DDL = """
+CREATE TABLE IF NOT EXISTS catch_records (
+    id TEXT PRIMARY KEY NOT NULL,
+    location TEXT NOT NULL,
+    datetime TEXT NOT NULL,
+    size_cm DOUBLE PRECISION NOT NULL,
+    count INTEGER NOT NULL,
+    memo TEXT NOT NULL DEFAULT '',
+    photo_path TEXT,
+    weather_json TEXT NOT NULL DEFAULT '{}'
+)
+"""
 
 
 def _ensure_catch_db() -> None:
-    """Create SQLite schema for catch records if needed."""
-    conn = sqlite3.connect(RECORDS_DB_ABS)
-    try:
-        _init_catch_db(conn)
-        conn.commit()
-    finally:
-        conn.close()
+    """Create schema for catch records if needed (SQLite or PostgreSQL)."""
+    engine = _catch_records_engine()
+    with engine.begin() as conn:
+        conn.execute(text(_CATCH_RECORDS_DDL))
 
 
 def load_catch_records() -> list[dict]:
-    """Load catch records from local SQLite database."""
+    """Load catch records from the configured database."""
     _ensure_catch_db()
-    conn = sqlite3.connect(RECORDS_DB_ABS)
-    try:
+    engine = _catch_records_engine()
+    with engine.connect() as conn:
         cur = conn.execute(
-            """
-            SELECT id, location, datetime, size_cm, count, memo, photo_path, weather_json
-            FROM catch_records
-            ORDER BY datetime ASC
-            """
+            text(
+                """
+                SELECT id, location, datetime, size_cm, count, memo, photo_path, weather_json
+                FROM catch_records
+                ORDER BY datetime ASC
+                """
+            )
         )
         result: list[dict] = []
         for db_row in cur.fetchall():
@@ -132,73 +229,76 @@ def load_catch_records() -> list[dict]:
                     "id": rid_val,
                     "location": loc_val,
                     "datetime": dt_val,
-                    "size_cm": size_val,
-                    "count": cnt_val,
+                    "size_cm": float(size_val),
+                    "count": int(cnt_val),
                     "memo": memo_val or "",
                     "photo_path": path_val,
                     "weather": weather,
                 }
             )
         return result
-    finally:
-        conn.close()
 
 
 def count_catch_records() -> int:
     """Return number of rows in catch_records (for UI when the section is locked)."""
     _ensure_catch_db()
-    conn = sqlite3.connect(RECORDS_DB_ABS)
-    try:
-        cur = conn.execute("SELECT COUNT(*) FROM catch_records")
-        return int(cur.fetchone()[0])
-    finally:
-        conn.close()
+    engine = _catch_records_engine()
+    with engine.connect() as conn:
+        n = conn.execute(text("SELECT COUNT(*) FROM catch_records")).scalar_one()
+        return int(n)
 
 
 def save_catch_records(record_list: list[dict]) -> None:
-    """Replace all catch records in SQLite (same contract as the former JSON file)."""
+    """Replace all catch records (full snapshot write)."""
     _ensure_catch_db()
-    conn = sqlite3.connect(RECORDS_DB_ABS)
-    try:
-        conn.execute("BEGIN")
-        conn.execute("DELETE FROM catch_records")
+    engine = _catch_records_engine()
+    insert_sql = text(
+        """
+        INSERT INTO catch_records
+        (id, location, datetime, size_cm, count, memo, photo_path, weather_json)
+        VALUES (:id, :loc, :dt, :size_cm, :cnt, :memo, :photo_path, :weather_json)
+        """
+    )
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM catch_records"))
         for stored in record_list:
             row_id = stored.get("id") or uuid.uuid4().hex
             weather = stored.get("weather")
             if not isinstance(weather, dict):
                 weather = {}
             conn.execute(
-                """
-                INSERT INTO catch_records
-                (id, location, datetime, size_cm, count, memo, photo_path, weather_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    row_id,
-                    stored["location"],
-                    stored["datetime"],
-                    float(stored["size_cm"]),
-                    int(stored["count"]),
-                    stored.get("memo", "") or "",
-                    stored.get("photo_path"),
-                    json.dumps(weather, ensure_ascii=False),
-                ),
+                insert_sql,
+                {
+                    "id": row_id,
+                    "loc": stored["location"],
+                    "dt": stored["datetime"],
+                    "size_cm": float(stored["size_cm"]),
+                    "cnt": int(stored["count"]),
+                    "memo": stored.get("memo", "") or "",
+                    "photo_path": stored.get("photo_path"),
+                    "weather_json": json.dumps(weather, ensure_ascii=False),
+                },
             )
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
 
 
 def save_uploaded_image(uploaded_file) -> str | None:
-    """Save uploaded squid image and return relative path."""
+    """Save uploaded squid image locally or to S3-compatible storage; return stored reference."""
     if uploaded_file is None:
         return None
-    IMAGE_DIR.mkdir(parents=True, exist_ok=True)
     suffix = Path(uploaded_file.name).suffix or ".jpg"
     file_name = f"{uuid.uuid4().hex}{suffix}"
+
+    if _photo_storage_enabled():
+        key = f"catch_images/{file_name}"
+        body = uploaded_file.getbuffer().tobytes()
+        ctype = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
+        bucket = str(st.secrets["photo_storage_s3_bucket"]).strip()
+        _s3_photo_client().put_object(
+            Bucket=bucket, Key=key, Body=body, ContentType=ctype
+        )
+        return f"{_REMOTE_PHOTO_PREFIX}{key}"
+
+    IMAGE_DIR.mkdir(parents=True, exist_ok=True)
     file_path = IMAGE_DIR / file_name
     with file_path.open("wb") as file:
         file.write(uploaded_file.getbuffer())
@@ -209,18 +309,10 @@ def _photo_path_after_edit(uploaded, delete_flag: bool, previous: dict) -> str |
     """Resolve stored photo path after the user edits or removes the image."""
     if uploaded:
         new_path = save_uploaded_image(uploaded)
-        old_p = previous.get("photo_path")
-        if old_p:
-            op = Path(old_p)
-            if op.exists():
-                op.unlink()
+        delete_stored_photo(previous.get("photo_path"))
         return new_path
     if delete_flag:
-        old_p = previous.get("photo_path")
-        if old_p:
-            op = Path(old_p)
-            if op.exists():
-                op.unlink()
+        delete_stored_photo(previous.get("photo_path"))
         return None
     return previous.get("photo_path")
 
@@ -622,7 +714,7 @@ if not RECORDS_SECTION_PASSWORD:
     _n_saved = count_catch_records()
     if _n_saved:
         st.info(
-            f"SQLite（{RECORDS_DB.name}）には釣果が **{_n_saved} 件**保存されています。"
+            f"{catch_records_storage_hint()} には釣果が **{_n_saved} 件**保存されています。"
             "一覧や編集を表示するには、上記のとおりパスワードを設定し、記録欄にログインしてください。"
         )
 elif not st.session_state.get("records_auth_unlocked"):
@@ -652,6 +744,17 @@ else:
         current_point, today_result, record_items
     )
     st.info(f"釣果ログ実績評価: {record_eval_label} - {record_eval_text}")
+    if _photo_storage_enabled():
+        st.caption(
+            "釣果写真は S3 互換ストレージ（Secrets の photo_storage_s3_*）に保存されます。"
+            "公開読み取り用 URL を付けない場合は、表示のたびにプリサインド URL（約1時間）を発行します。"
+        )
+    elif _catch_records_database_url():
+        st.caption(
+            "釣果の「行データ」はリモート DB に保存されます。"
+            "写真はローカルフォルダのみのため、Streamlit Cloud では再デプロイ後に画像が失われます。"
+            "photo_storage_s3_* を設定すると写真も永続化できます。"
+        )
 
     with st.form("catch_log_form", clear_on_submit=True):
         record_col1, record_col2 = st.columns(2)
@@ -686,7 +789,12 @@ else:
                 "pressure_hpa": None,
                 "sea_level_m": None,
             }
-        photo_path = save_uploaded_image(squid_photo)
+        try:
+            photo_path = save_uploaded_image(squid_photo)
+        except ClientError as exc:
+            st.error("オブジェクトストレージへの写真アップロードに失敗しました。")
+            st.exception(exc)
+            st.stop()
         record_items.append(
             {
                 "id": uuid.uuid4().hex,
@@ -704,8 +812,8 @@ else:
         except OSError as exc:
             st.error("ファイルへ書き込めませんでした（権限・同期・ロックの可能性）。")
             st.exception(exc)
-        except sqlite3.Error as exc:
-            st.error("SQLiteへの保存に失敗しました。")
+        except SQLAlchemyError as exc:
+            st.error("データベースへの保存に失敗しました。")
             st.exception(exc)
         else:
             st.success("釣果ログを保存しました。")
@@ -764,16 +872,17 @@ else:
                     placeholder="ヒットエギ・レンジ・潮位など",
                     key=f"ed_memo_{edit_idx}",
                 )
-                existing_photo = rec_before.get("photo_path")
-                if existing_photo and Path(existing_photo).exists():
-                    st.caption(f"現在の写真: {existing_photo}")
+                existing_preview = photo_display_url(rec_before.get("photo_path"))
+                if existing_preview:
+                    st.caption("現在の写真")
+                    st.image(existing_preview, width=280)
                 ed_photo = st.file_uploader(
                     "新しい写真に差し替え（未選択ならそのまま）",
                     type=["jpg", "jpeg", "png", "webp"],
                     key=f"ed_photo_{edit_idx}",
                 )
                 delete_photo_on_edit = st.checkbox(
-                    "写真を削除する（ファイルも削除）",
+                    "写真を削除する（ローカル／オブジェクトストレージからも削除）",
                     value=False,
                     key=f"ed_delphoto_{edit_idx}",
                 )
@@ -796,9 +905,14 @@ else:
                             "sea_level_m": None,
                         }
                     old = record_items[store_idx]
-                    photo_stored = _photo_path_after_edit(
-                        ed_photo, delete_photo_on_edit, old
-                    )
+                    try:
+                        photo_stored = _photo_path_after_edit(
+                            ed_photo, delete_photo_on_edit, old
+                        )
+                    except ClientError as exc:
+                        st.error("オブジェクトストレージへの写真アップロードに失敗しました。")
+                        st.exception(exc)
+                        st.stop()
                     record_id = old.get("id") or uuid.uuid4().hex
                     record_items[store_idx] = {
                         "id": record_id,
@@ -815,8 +929,8 @@ else:
                     except OSError as exc:
                         st.error("ファイルへ書き込めませんでした。")
                         st.exception(exc)
-                    except sqlite3.Error as exc:
-                        st.error("SQLiteへの保存に失敗しました。")
+                    except SQLAlchemyError as exc:
+                        st.error("データベースへの保存に失敗しました。")
                         st.exception(exc)
                     else:
                         st.success("ログを更新しました。")
@@ -847,16 +961,14 @@ else:
                     st.error("削除対象のログが見つかりませんでした。")
                 else:
                     if delete_photo_file and target_photo_path:
-                        photo_file = Path(target_photo_path)
-                        if photo_file.exists():
-                            photo_file.unlink()
+                        delete_stored_photo(target_photo_path)
                     try:
                         save_catch_records(record_items)
                     except OSError as exc:
                         st.error("ファイルへ書き込めませんでした。")
                         st.exception(exc)
-                    except sqlite3.Error as exc:
-                        st.error("SQLiteへの保存に失敗しました。")
+                    except SQLAlchemyError as exc:
+                        st.error("データベースへの保存に失敗しました。")
                         st.exception(exc)
                     else:
                         st.success("ログを削除しました。")
@@ -906,14 +1018,12 @@ else:
             photo_cols = st.columns(3)
             photo_idx = 0
             for hist in displayed_records:
-                if not hist.get("photo_path"):
-                    continue
-                photo_file = Path(hist["photo_path"])
-                if not photo_file.exists():
+                img_src = photo_display_url(hist.get("photo_path"))
+                if not img_src:
                     continue
                 with photo_cols[photo_idx % 3]:
                     st.image(
-                        str(photo_file),
+                        img_src,
                         caption=f"{hist['location']} {hist['datetime'].replace('T', ' ')}",
                     )
                 photo_idx += 1
