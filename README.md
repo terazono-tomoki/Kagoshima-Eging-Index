@@ -108,13 +108,34 @@ Open-Meteo が返す「その地点の海面の高さ（潮汐を含むモデル
 
 重み・`4.2`・閾値の数字は、機械学習で最適化したものではなく **決め打ちの目安**です。
 
-### 4. 保存・認証（ローカル / Streamlit Cloud）
+### 4. 保存・認証（Neon 前提）
 
 - **ローカル（既定）**: 釣果は SQLite の `catch_records.db`（テーブル `catch_records`）、気象スナップショットは列 `weather_json`（TEXT 内の JSON）。写真は `catch_images/`。
-- **Streamlit Cloud などディスクが永続しない環境**: Secrets に **`catch_records_database_url`**（PostgreSQL、`postgresql://...`）を設定。未設定ならローカル SQLite。
-- **写真の永続化（任意・S3 互換）**: 次を設定すると、アップロード画像がオブジェクトストレージに保存される（AWS S3 / Cloudflare R2 など）。
-  - **必須**: `photo_storage_s3_bucket`, `photo_storage_s3_access_key`, `photo_storage_s3_secret_key`
-  - **任意**: `photo_storage_s3_endpoint_url`（R2 では必須に近い）、`photo_storage_s3_region`（未設定時は `auto`）、`photo_storage_public_base_url`（公開バケット／CDN のベース URL。末尾スラッシュなし。未設定時は表示にプリサインド URL を使用）
-- DB に保存されるのは `s3key:catch_images/ファイル名` 形式の参照（公開 URL は DB に保存しない）。
-- 記録欄の閲覧・保存は **`records_section_password`** で制限可能。
+- **Streamlit Cloud で消えない保存にする**: [Neon](https://neon.tech) の PostgreSQL を使う。アプリは接続 URL があれば自動で `catch_records` テーブルを作成する（マイグレーション不要）。
+
+#### Neon の手順
+
+1. Neon でプロジェクトを作成し、`Connect` 画面を開く。
+2. 接続文字列の種類は `postgresql://...`（または `postgres://...`）を使う。
+3. 接続画面で表示されるパスワードが `*` のままなら、その文字列は使えない。
+   - `パスワードを表示` で実値を表示してコピーする
+   - 失敗する場合は `パスワードをリセット` 後に再コピーする
+4. Streamlit Community Cloud の `Secrets` に次を設定する。
+
+```toml
+catch_records_database_url = "postgresql://USER:PASSWORD@HOST/DBNAME"
+records_section_password = "任意のパスワード"
+```
+
+5. 再デプロイ後、アプリの「釣果ログ」付近に **リモート PostgreSQL** の表示が出ることを確認する。
+
+- **補足**:
+  - `catch_records_database_url` の代わりに `DATABASE_URL` でも可（`postgresql://` / `postgres://` のときのみ使用）。
+  - URL に `sslmode` が無い場合、localhost 以外ではアプリが `sslmode=require` を自動付与する。
+  - Secrets が空だと SQLite にフォールバックするため、Cloud では再起動後にログが消えることがある。
+
+- **写真の永続化（任意・S3 互換）**:
+  - 必須: `photo_storage_s3_bucket`, `photo_storage_s3_access_key`, `photo_storage_s3_secret_key`
+  - 任意: `photo_storage_s3_endpoint_url`, `photo_storage_s3_region`（既定 `auto`）, `photo_storage_public_base_url`
+  - DB には `s3key:catch_images/ファイル名` 形式の参照を保存する（公開 URL は保存しない）。
 

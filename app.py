@@ -17,26 +17,22 @@ from sqlalchemy.exc import SQLAlchemyError
 import streamlit as st
 from streamlit_folium import st_folium
 
-# DB・画像はカレントディレクトリではなくこのファイルと同じフォルダに固定する
 _APP_ROOT = Path(__file__).resolve().parent
 
 st.set_page_config(page_title="鹿児島エギング指数", layout="wide")
 st.title("鹿児島エギング指数マップ 🎣")
 st.caption("選択したポイントを対象に、エギング向けの釣りやすさを独自ロジックで判定します。")
 
-# 対象地点の座標（2地点のみ）
 locations = {
     "東風泊": [31.074, 130.783],
     "佐多岬": [30.994, 130.660],
 }
 
 RECORDS_DB = _APP_ROOT / "catch_records.db"
-# sqlalchemy の sqlite URL 用（バックスラッシュは URL では避ける）
 RECORDS_DB_ABS = str(RECORDS_DB.resolve())
 IMAGE_DIR = _APP_ROOT / "catch_images"
 RECORDS_SECTION_PASSWORD = st.secrets.get("records_section_password")
 
-# リモート保存時は DB の photo_path に "s3key:bucket内キー" を保存する（公開URLは保存しない）
 _REMOTE_PHOTO_PREFIX = "s3key:"
 
 
@@ -111,26 +107,59 @@ def photo_display_url(stored: str | None) -> str | None:
 
 
 def _catch_records_database_url() -> str | None:
-    """Streamlit Secrets にあるときのみリモート DB（例: Neon / Supabase の PostgreSQL）を使う。"""
-    raw = st.secrets.get("catch_records_database_url")
-    if raw is None:
-        return None
-    url = str(raw).strip()
-    return url or None
+    """PostgreSQL の接続 URL（Secrets）。Neon 等がよく使う DATABASE_URL もフォールバックとして許可。"""
+    keys = ("catch_records_database_url", "DATABASE_URL")
+    for key in keys:
+        raw = st.secrets.get(key)
+        if raw is None:
+            continue
+        url = str(raw).strip()
+        if not url:
+            continue
+        lo = url.lower()
+        if key == "DATABASE_URL" and not (
+            lo.startswith("postgresql://") or lo.startswith("postgres://")
+        ):
+            continue
+        return url
+    return None
+
+
+def _postgres_url_with_ssl(url: str) -> str:
+    """マネージド PostgreSQL で SSL 省略時に sslmode=require を付与（localhost は対象外）。"""
+    lo = url.lower()
+    if "sslmode=" in lo:
+        return url
+    if not (lo.startswith("postgresql://") or lo.startswith("postgres://")):
+        return url
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        host = (parsed.hostname or "").lower()
+        if host in ("localhost", "127.0.0.1", "::1", ""):
+            return url
+    except ValueError:
+        pass
+    joiner = "&" if "?" in url else "?"
+    return f"{url}{joiner}sslmode=require"
 
 
 def catch_records_storage_hint() -> str:
     """UI 向けの保存先の短文。"""
     if _catch_records_database_url():
-        return "リモートデータベース（Secrets の catch_records_database_url）"
-    return f"ローカル SQLite（{RECORDS_DB.name}）"
+        return "リモート PostgreSQL（Secrets の catch_records_database_url または DATABASE_URL）"
+    return f"このサーバー上の SQLite（{RECORDS_DB.name}）"
 
 
 @st.cache_resource
 def _catch_records_engine():
     remote = _catch_records_database_url()
     if remote:
-        return create_engine(remote, pool_pre_ping=True)
+        return create_engine(
+            _postgres_url_with_ssl(remote),
+            pool_pre_ping=True,
+            pool_size=2,
+            max_overflow=2,
+        )
     sqlite_url_path = RECORDS_DB_ABS.replace("\\", "/")
     return create_engine(f"sqlite:///{sqlite_url_path}", pool_pre_ping=True)
 
@@ -140,7 +169,6 @@ def tide_score_from_tide_range(tide_range_m: float) -> tuple[float, str]:
     その日の海面高度（潮汐込みモデル）から求めた潮差に基づき潮スコアを返す。
     tide_range_m は同日の hourly sea level の最大値と最小値の差（メートル）。
     """
-    # 潮差が大きいほど「大潮に近い」動きとみなす（閾値はおおよそ西南海域向けの目安）
     ref_range_m = 1.85
     normalized = max(0.0, min(1.0, tide_range_m / ref_range_m))
     score = 45.0 + (normalized * 55.0)
@@ -624,10 +652,8 @@ st.sidebar.caption(f"現在の選択: {current_point}")
 col_left, col_right = st.columns([1.4, 1.0])
 
 with col_left:
-    # 地図作成
     m = folium.Map(location=[31.3, 130.6], zoom_start=9)
 
-    # ピンを立てる（今日のランク表示）
     for name, point_coords in locations.items():
         try:
             location_forecast = weekly_forecast(name, days=7)
@@ -706,6 +732,17 @@ st.caption(
 
 st.divider()
 st.subheader("釣果ログ（写真 + 日時 + 気象）")
+if _catch_records_database_url():
+    st.caption(
+        "釣果の行データは **リモート PostgreSQL** に保存されています。"
+        "アプリやコンテナを再起動しても消えません（DB 側が別サービスのため）。"
+    )
+else:
+    st.caption(
+        f"釣果の行データは **このサーバー上の SQLite（{RECORDS_DB.name}）** にあります。"
+        "Streamlit Cloud など **ディスクが永続しない環境**では、再起動や再デプロイ後に **ログが空になることがあります**。"
+        "Secrets に **`catch_records_database_url`**（または **`DATABASE_URL`**）で PostgreSQL の接続 URL を設定してください。"
+    )
 if not RECORDS_SECTION_PASSWORD:
     st.warning(
         "記録欄パスワードが未設定です。"
