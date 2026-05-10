@@ -450,10 +450,7 @@ st.caption(
 
 st.divider()
 st.subheader("釣果ログ（写真 + 日時 + 気象）")
-st.caption(
-    "釣果の行データは **PostgreSQL** に保存されています。"
-    "アプリやコンテナを再起動しても消えません（DB 側が別サービスのため）。"
-)
+
 if not RECORDS_SECTION_PASSWORD:
     st.warning(
         "記録欄パスワードが未設定です。"
@@ -492,12 +489,7 @@ else:
         current_point, today_result, record_items
     )
     st.info(f"釣果ログ実績評価: {record_eval_label} - {record_eval_text}")
-    if _photo_storage_enabled():
-        st.caption(
-            "釣果写真は S3 互換ストレージ（Secrets の photo_storage_s3_*）に保存されます。"
-            "公開読み取り用 URL を付けない場合は、表示のたびにプリサインド URL（約1時間）を発行します。"
-        )
-    else:
+    if not _photo_storage_enabled():
         st.caption(
             "釣果の「行データ」は PostgreSQL に保存されています。"
             "写真はローカルフォルダのみのため、Streamlit Cloud では再デプロイ後に画像が失われます。"
