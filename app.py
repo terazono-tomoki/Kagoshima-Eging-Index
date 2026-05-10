@@ -185,6 +185,40 @@ CREATE TABLE IF NOT EXISTS catch_records (
 )
 """
 
+_UPSERT_CATCH_RECORD_SQL = text(
+    """
+    INSERT INTO catch_records
+    (id, location, datetime, size_cm, count, memo, photo_path, weather_json)
+    VALUES (:id, :loc, :dt, :size_cm, :cnt, :memo, :photo_path, :weather_json)
+    ON CONFLICT (id) DO UPDATE SET
+        location = EXCLUDED.location,
+        datetime = EXCLUDED.datetime,
+        size_cm = EXCLUDED.size_cm,
+        count = EXCLUDED.count,
+        memo = EXCLUDED.memo,
+        photo_path = EXCLUDED.photo_path,
+        weather_json = EXCLUDED.weather_json
+    """
+)
+
+
+def _catch_record_sql_params(record: dict) -> dict:
+    """Bind parameters for INSERT/UPSERT of one catch record."""
+    row_id = record.get("id") or uuid.uuid4().hex
+    weather = record.get("weather")
+    if not isinstance(weather, dict):
+        weather = {}
+    return {
+        "id": row_id,
+        "loc": record["location"],
+        "dt": record["datetime"],
+        "size_cm": float(record["size_cm"]),
+        "cnt": int(record["count"]),
+        "memo": record.get("memo", "") or "",
+        "photo_path": record.get("photo_path"),
+        "weather_json": json.dumps(weather, ensure_ascii=False),
+    }
+
 
 def _ensure_catch_db() -> None:
     """Create schema for catch records if needed (PostgreSQL)."""
@@ -240,37 +274,21 @@ def count_catch_records() -> int:
         return int(n)
 
 
-def save_catch_records(record_list: list[dict]) -> None:
-    """Replace all catch records (full snapshot write)."""
+def upsert_catch_record(record: dict) -> None:
+    """Insert or update a single catch record (no full-table rewrite)."""
     _ensure_catch_db()
     engine = _catch_records_engine()
-    insert_sql = text(
-        """
-        INSERT INTO catch_records
-        (id, location, datetime, size_cm, count, memo, photo_path, weather_json)
-        VALUES (:id, :loc, :dt, :size_cm, :cnt, :memo, :photo_path, :weather_json)
-        """
-    )
+    params = _catch_record_sql_params(record)
     with engine.begin() as conn:
-        conn.execute(text("DELETE FROM catch_records"))
-        for stored in record_list:
-            row_id = stored.get("id") or uuid.uuid4().hex
-            weather = stored.get("weather")
-            if not isinstance(weather, dict):
-                weather = {}
-            conn.execute(
-                insert_sql,
-                {
-                    "id": row_id,
-                    "loc": stored["location"],
-                    "dt": stored["datetime"],
-                    "size_cm": float(stored["size_cm"]),
-                    "cnt": int(stored["count"]),
-                    "memo": stored.get("memo", "") or "",
-                    "photo_path": stored.get("photo_path"),
-                    "weather_json": json.dumps(weather, ensure_ascii=False),
-                },
-            )
+        conn.execute(_UPSERT_CATCH_RECORD_SQL, params)
+
+
+def delete_catch_record(row_pk: str) -> None:
+    """Delete one catch record by primary key."""
+    _ensure_catch_db()
+    engine = _catch_records_engine()
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM catch_records WHERE id = :id"), {"id": row_pk})
 
 
 def save_uploaded_image(uploaded_file) -> str | None:
@@ -527,23 +545,18 @@ else:
             st.error("オブジェクトストレージへの写真アップロードに失敗しました。")
             st.exception(exc)
             st.stop()
-        record_items.append(
-            {
-                "id": uuid.uuid4().hex,
-                "location": catch_location,
-                "datetime": catch_datetime.isoformat(timespec="minutes"),
-                "size_cm": float(squid_size),
-                "count": int(squid_count),
-                "memo": memo.strip(),
-                "photo_path": photo_path,
-                "weather": weather_snapshot,
-            }
-        )
+        new_record = {
+            "id": uuid.uuid4().hex,
+            "location": catch_location,
+            "datetime": catch_datetime.isoformat(timespec="minutes"),
+            "size_cm": float(squid_size),
+            "count": int(squid_count),
+            "memo": memo.strip(),
+            "photo_path": photo_path,
+            "weather": weather_snapshot,
+        }
         try:
-            save_catch_records(record_items)
-        except OSError as exc:
-            st.error("ファイルへ書き込めませんでした（権限・同期・ロックの可能性）。")
-            st.exception(exc)
+            upsert_catch_record(new_record)
         except SQLAlchemyError as exc:
             st.error("データベースへの保存に失敗しました。")
             st.exception(exc)
@@ -648,7 +661,7 @@ else:
                         st.exception(exc)
                         st.stop()
                     record_id = old.get("id") or uuid.uuid4().hex
-                    record_items[store_idx] = {
+                    updated = {
                         "id": record_id,
                         "location": ed_location,
                         "datetime": catch_dt.isoformat(timespec="minutes"),
@@ -658,11 +671,9 @@ else:
                         "photo_path": photo_stored,
                         "weather": weather_snapshot,
                     }
+                    record_items[store_idx] = updated
                     try:
-                        save_catch_records(record_items)
-                    except OSError as exc:
-                        st.error("ファイルへ書き込めませんでした。")
-                        st.exception(exc)
+                        upsert_catch_record(updated)
                     except SQLAlchemyError as exc:
                         st.error("データベースへの保存に失敗しました。")
                         st.exception(exc)
@@ -689,20 +700,19 @@ else:
             if submit_delete:
                 target_record = sorted_records[delete_idx]
                 target_photo_path = target_record.get("photo_path")
-                try:
-                    record_items.remove(target_record)
-                except ValueError:
-                    st.error("削除対象のログが見つかりませんでした。")
+                rid = target_record.get("id")
+                if not rid:
+                    st.error(
+                        "削除できません（ログに ID がありません）。"
+                        "一覧を再表示してから再度お試しください。"
+                    )
                 else:
                     if delete_photo_file and target_photo_path:
                         delete_stored_photo(target_photo_path)
                     try:
-                        save_catch_records(record_items)
-                    except OSError as exc:
-                        st.error("ファイルへ書き込めませんでした。")
-                        st.exception(exc)
+                        delete_catch_record(rid)
                     except SQLAlchemyError as exc:
-                        st.error("データベースへの保存に失敗しました。")
+                        st.error("データベースからの削除に失敗しました。")
                         st.exception(exc)
                     else:
                         st.success("ログを削除しました。")
