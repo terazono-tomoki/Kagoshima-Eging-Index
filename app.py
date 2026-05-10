@@ -37,8 +37,33 @@ locations = {
     "佐多岬": [30.994, 130.660],
 }
 
-RECORDS_DB = _APP_ROOT / "catch_records.db"
-RECORDS_DB_ABS = str(RECORDS_DB.resolve())
+
+def _require_postgres_database_url() -> str:
+    """Secrets から PostgreSQL の接続 URL を返す。無ければエラーを表示してアプリを停止する。"""
+    keys = ("catch_records_database_url", "DATABASE_URL")
+    for key in keys:
+        raw = st.secrets.get(key)
+        if raw is None:
+            continue
+        url = str(raw).strip()
+        if not url:
+            continue
+        lo = url.lower()
+        if key == "DATABASE_URL" and not (
+            lo.startswith("postgresql://") or lo.startswith("postgres://")
+        ):
+            continue
+        return url
+    st.error(
+        "釣果ログには **PostgreSQL** が必要です。\n\n"
+        ".streamlit/secrets.toml に **catch_records_database_url** または "
+        "**DATABASE_URL**（`postgresql://` または `postgres://` で始まる URL）を設定してください。"
+    )
+    st.stop()
+
+
+POSTGRES_DATABASE_URL = _require_postgres_database_url()
+
 IMAGE_DIR = _APP_ROOT / "catch_images"
 RECORDS_SECTION_PASSWORD = st.secrets.get("records_section_password")
 
@@ -114,25 +139,6 @@ def photo_display_url(stored: str | None) -> str | None:
     return str(p) if p.exists() else None
 
 
-def _catch_records_database_url() -> str | None:
-    """PostgreSQL の接続 URL（Secrets）。Neon 等がよく使う DATABASE_URL もフォールバックとして許可。"""
-    keys = ("catch_records_database_url", "DATABASE_URL")
-    for key in keys:
-        raw = st.secrets.get(key)
-        if raw is None:
-            continue
-        url = str(raw).strip()
-        if not url:
-            continue
-        lo = url.lower()
-        if key == "DATABASE_URL" and not (
-            lo.startswith("postgresql://") or lo.startswith("postgres://")
-        ):
-            continue
-        return url
-    return None
-
-
 def _postgres_url_with_ssl(url: str) -> str:
     """マネージド PostgreSQL で SSL 省略時に sslmode=require を付与（localhost は対象外）。"""
     lo = url.lower()
@@ -153,23 +159,17 @@ def _postgres_url_with_ssl(url: str) -> str:
 
 def catch_records_storage_hint() -> str:
     """UI 向けの保存先の短文。"""
-    if _catch_records_database_url():
-        return "リモート PostgreSQL（Secrets の catch_records_database_url または DATABASE_URL）"
-    return f"このサーバー上の SQLite（{RECORDS_DB.name}）"
+    return "PostgreSQL（Secrets の catch_records_database_url または DATABASE_URL）"
 
 
 @st.cache_resource
 def _catch_records_engine():
-    remote = _catch_records_database_url()
-    if remote:
-        return create_engine(
-            _postgres_url_with_ssl(remote),
-            pool_pre_ping=True,
-            pool_size=2,
-            max_overflow=2,
-        )
-    sqlite_url_path = RECORDS_DB_ABS.replace("\\", "/")
-    return create_engine(f"sqlite:///{sqlite_url_path}", pool_pre_ping=True)
+    return create_engine(
+        _postgres_url_with_ssl(POSTGRES_DATABASE_URL),
+        pool_pre_ping=True,
+        pool_size=2,
+        max_overflow=2,
+    )
 
 
 _CATCH_RECORDS_DDL = """
@@ -187,7 +187,7 @@ CREATE TABLE IF NOT EXISTS catch_records (
 
 
 def _ensure_catch_db() -> None:
-    """Create schema for catch records if needed (SQLite or PostgreSQL)."""
+    """Create schema for catch records if needed (PostgreSQL)."""
     engine = _catch_records_engine()
     with engine.begin() as conn:
         conn.execute(text(_CATCH_RECORDS_DDL))
@@ -432,19 +432,10 @@ st.caption(
 
 st.divider()
 st.subheader("釣果ログ（写真 + 日時 + 気象）")
-if _catch_records_database_url():
-    st.caption(
-        "釣果の行データは **リモート PostgreSQL** に保存されています。"
-        "アプリやコンテナを再起動しても消えません（DB 側が別サービスのため）。"
-    )
-else:
-    st.caption(
-        f"釣果の行データは **このサーバー上の SQLite（{RECORDS_DB.name}）** にあります。"
-        "Streamlit Cloud など **ディスクが永続しない環境**では、"
-        "再起動や再デプロイ後に **ログが空になることがあります**。"
-        "Secrets に **`catch_records_database_url`**（または **`DATABASE_URL`**）で "
-        "PostgreSQL の接続 URL を設定してください。"
-    )
+st.caption(
+    "釣果の行データは **PostgreSQL** に保存されています。"
+    "アプリやコンテナを再起動しても消えません（DB 側が別サービスのため）。"
+)
 if not RECORDS_SECTION_PASSWORD:
     st.warning(
         "記録欄パスワードが未設定です。"
@@ -488,9 +479,9 @@ else:
             "釣果写真は S3 互換ストレージ（Secrets の photo_storage_s3_*）に保存されます。"
             "公開読み取り用 URL を付けない場合は、表示のたびにプリサインド URL（約1時間）を発行します。"
         )
-    elif _catch_records_database_url():
+    else:
         st.caption(
-            "釣果の「行データ」はリモート DB に保存されます。"
+            "釣果の「行データ」は PostgreSQL に保存されています。"
             "写真はローカルフォルダのみのため、Streamlit Cloud では再デプロイ後に画像が失われます。"
             "photo_storage_s3_* を設定すると写真も永続化できます。"
         )

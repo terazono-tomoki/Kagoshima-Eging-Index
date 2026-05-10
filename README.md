@@ -108,18 +108,15 @@ Open-Meteo が返す「その地点の海面の高さ（潮汐を含むモデル
 
 重み・`4.2`・閾値の数字は、機械学習で最適化したものではなく **決め打ちの目安**です。
 
-### 4. 保存・認証（PostgreSQL・SQLite・S3 互換ストレージ）
+### 4. 保存・認証（PostgreSQL・S3 互換ストレージ）
 
-釣果ログ（テキスト行＋気象 JSON＋写真参照）は **データベース** に、写真ファイルそのものは **ローカルディレクトリ** か **S3 互換バケット** のどちらかに保存します。閲覧・編集・削除は **単一パスワード** でガードしています（ユーザーアカウントや OAuth はありません）。
+釣果ログ（テキスト行＋気象 JSON＋写真参照）は **PostgreSQL** に、写真ファイルそのものは **ローカルディレクトリ** か **S3 互換バケット** のどちらかに保存します。閲覧・編集・削除は **単一パスワード** でガードしています（ユーザーアカウントや OAuth はありません）。
 
 #### データベース（釣果の行データ）
 
-| 条件 | 保存先 |
-|------|--------|
-| Streamlit Secrets に **`catch_records_database_url`** または **`DATABASE_URL`**（`postgresql://` / `postgres://` のみ）が設定されている | **PostgreSQL**（Neon 等のマネージド向け。ホストが localhost 以外で URL に `sslmode` が無い場合は **`sslmode=require` を自動付与**） |
-| 上記が無い | アプリ直下の **SQLite**（`catch_records.db`） |
+**PostgreSQL が必須**です。Streamlit Secrets に **`catch_records_database_url`** または **`DATABASE_URL`**（`postgresql://` / `postgres://` で始まる URL のみ）を設定してください。Neon 等のマネージド向けに、ホストが localhost 以外で URL に `sslmode` が無い場合は **`sslmode=require` を自動付与**します。
 
-SQLite は手元や固定サーバーではそのまま使えます。**Streamlit Cloud のようにディスクが消える環境**では、SQLite のログは再起動・再デプロイ後に失われることがあるため、永続化したい場合は PostgreSQL を Secrets で指定してください。
+URL が無い場合、アプリ起動時にエラーを表示して停止します（ローカル開発でも PostgreSQL が必要です）。
 
 初回接続時に `catch_records` テーブルが無ければ **自動作成**されます（`CREATE TABLE IF NOT EXISTS`）。
 
