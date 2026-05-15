@@ -124,6 +124,26 @@ def fetch_open_meteo_hourly(  # pylint: disable=too-many-locals
 CATCH_WEATHER_WIND_UNIT_KEY = "_wind_unit"
 
 
+def format_wind_display(wind_mps: float | None) -> str:
+    """風速を km/h 主表示・m/s 併記で返す（内部計算は m/s のまま）。"""
+    if wind_mps is None:
+        return "—"
+    mps = float(wind_mps)
+    kmh = int(round(mps * 3.6))
+    mps_text = f"{mps:g}" if mps != int(mps) else str(int(mps))
+    return f"{kmh} km/h（{mps_text} m/s）"
+
+
+def forecast_weather_for_compare(forecast_row: dict) -> dict:
+    """予測結果 dict から実績比較用の気象フィールドだけを取り出す。"""
+    return {
+        "wind_mps": forecast_row["wind_mps"],
+        "wave_m": forecast_row["wave_m"],
+        "water_temp": forecast_row["water_temp"],
+        "pressure_hpa": forecast_row["pressure_hpa"],
+    }
+
+
 def normalize_catch_weather_wind(weather: dict) -> tuple[dict, bool]:
     """
     釣果ログの weather を m/s 基準に揃える。

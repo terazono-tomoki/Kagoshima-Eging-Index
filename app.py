@@ -22,6 +22,8 @@ from streamlit_folium import st_folium
 from eging_forecast import (
     CATCH_WEATHER_WIND_UNIT_KEY,
     evaluate_from_catch_records,
+    forecast_weather_for_compare,
+    format_wind_display,
     get_weather_snapshot,
     normalize_catch_weather_wind,
     rank_color,
@@ -29,24 +31,6 @@ from eging_forecast import (
 )
 
 _APP_ROOT = Path(__file__).resolve().parent
-
-
-def format_wind_display(wind_mps: float | None) -> str:
-    """風速を km/h 主表示・m/s 併記で返す（内部計算は m/s のまま）。"""
-    if wind_mps is None:
-        return "—"
-    mps = float(wind_mps)
-    kmh = int(round(mps * 3.6))
-    mps_text = f"{mps:g}" if mps != int(mps) else str(int(mps))
-    return f"{kmh} km/h（{mps_text} m/s）"
-
-
-def wind_kmh(wind_mps: float | None) -> int | None:
-    """m/s を km/h に変換（表の数値列用）。"""
-    if wind_mps is None:
-        return None
-    return int(round(float(wind_mps) * 3.6))
-
 
 st.set_page_config(page_title="鹿児島エギング指数", layout="wide")
 st.title("鹿児島エギング指数マップ 🎣")
@@ -459,8 +443,7 @@ forecast_df = pd.DataFrame(
             "ランク": fc["rank"],
             "総合スコア": fc["total_score"],
             "潮傾向": fc["tide_type"],
-            "風(km/h)": wind_kmh(fc["wind_mps"]),
-            "風(m/s)": fc["wind_mps"],
+            "風": format_wind_display(fc["wind_mps"]),
             "波(m)": fc["wave_m"],
             "水温(℃)": fc["water_temp"],
             "気圧(hPa)": fc["pressure_hpa"],
@@ -511,9 +494,15 @@ else:
         st.session_state.records_auth_unlocked = False
         st.rerun()
 
+    save_notice = st.session_state.pop("catch_save_notice", None)
+    if save_notice:
+        st.success(save_notice)
+
     record_items = load_catch_records()
     record_eval_label, record_eval_text = evaluate_from_catch_records(
-        current_point, today_result, record_items
+        current_point,
+        forecast_weather_for_compare(today_result),
+        record_items,
     )
     st.info(f"釣果ログ実績評価: {record_eval_label} - {record_eval_text}")
     if not _photo_storage_enabled():
@@ -581,7 +570,12 @@ else:
             st.error("データベースへの保存に失敗しました。")
             st.exception(exc)
         else:
-            st.success("釣果ログを保存しました。")
+            st.session_state["catch_save_notice"] = (
+                "釣果ログを保存しました。"
+                f"（気象: 風 {format_wind_display(weather_snapshot.get('wind_mps'))} / "
+                f"波 {weather_snapshot.get('wave_m')} m / "
+                f"水温 {weather_snapshot.get('water_temp')} ℃）"
+            )
             st.rerun()
 
     if record_items:
@@ -767,8 +761,7 @@ else:
                         "ポイント": hist["location"],
                         "杯数": hist["count"],
                         "胴長(cm)": hist["size_cm"],
-                        "風(km/h)": wind_kmh(hist["weather"].get("wind_mps")),
-                        "風(m/s)": hist["weather"].get("wind_mps"),
+                        "風": format_wind_display(hist["weather"].get("wind_mps")),
                         "波(m)": hist["weather"].get("wave_m"),
                         "水温(℃)": hist["weather"].get("water_temp"),
                         "気圧(hPa)": hist["weather"].get("pressure_hpa"),
