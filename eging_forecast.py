@@ -69,6 +69,7 @@ def fetch_open_meteo_hourly(  # pylint: disable=too-many-locals
         "start_date": day_text,
         "end_date": day_text,
         "hourly": "wind_speed_10m,pressure_msl",
+        "windspeed_unit": "ms",
     }
     marine_params = {
         "latitude": lat,
@@ -120,6 +121,30 @@ def fetch_open_meteo_hourly(  # pylint: disable=too-many-locals
     )
 
 
+CATCH_WEATHER_WIND_UNIT_KEY = "_wind_unit"
+
+
+def normalize_catch_weather_wind(weather: dict) -> tuple[dict, bool]:
+    """
+    釣果ログの weather を m/s 基準に揃える。
+    旧データは Open-Meteo の km/h を wind_mps 名で保存していたため ÷3.6 する。
+    """
+    if not isinstance(weather, dict):
+        return {}, False
+    if weather.get(CATCH_WEATHER_WIND_UNIT_KEY) == "ms":
+        return weather, False
+
+    updated = dict(weather)
+    wind = updated.get("wind_mps")
+    if wind is not None:
+        try:
+            updated["wind_mps"] = round(float(wind) / 3.6, 1)
+        except (TypeError, ValueError):
+            pass
+    updated[CATCH_WEATHER_WIND_UNIT_KEY] = "ms"
+    return updated, True
+
+
 def get_weather_snapshot(target_coords: list[float], target_dt: datetime) -> dict:
     """Get nearest-hour weather snapshot for record registration."""
     hourly = fetch_open_meteo_hourly(target_coords, target_dt.date())
@@ -133,6 +158,7 @@ def get_weather_snapshot(target_coords: list[float], target_dt: datetime) -> dic
         "water_temp": round(float(nearest["water_temp"]), 1),
         "pressure_hpa": round(float(nearest["pressure_hpa"]), 1),
         "sea_level_m": round(float(nearest["sea_level_m"]), 3),
+        CATCH_WEATHER_WIND_UNIT_KEY: "ms",
     }
 
 
@@ -186,6 +212,7 @@ def fetch_open_meteo_daily(  # pylint: disable=too-many-locals
         "timezone": "Asia/Tokyo",
         "forecast_days": 7,
         "hourly": "wind_speed_10m,pressure_msl",
+        "windspeed_unit": "ms",
     }
     marine_params = {
         "latitude": lat,

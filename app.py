@@ -20,13 +20,33 @@ import streamlit as st
 from streamlit_folium import st_folium
 
 from eging_forecast import (
+    CATCH_WEATHER_WIND_UNIT_KEY,
     evaluate_from_catch_records,
     get_weather_snapshot,
+    normalize_catch_weather_wind,
     rank_color,
     weekly_forecast,
 )
 
 _APP_ROOT = Path(__file__).resolve().parent
+
+
+def format_wind_display(wind_mps: float | None) -> str:
+    """風速を km/h 主表示・m/s 併記で返す（内部計算は m/s のまま）。"""
+    if wind_mps is None:
+        return "—"
+    mps = float(wind_mps)
+    kmh = int(round(mps * 3.6))
+    mps_text = f"{mps:g}" if mps != int(mps) else str(int(mps))
+    return f"{kmh} km/h（{mps_text} m/s）"
+
+
+def wind_kmh(wind_mps: float | None) -> int | None:
+    """m/s を km/h に変換（表の数値列用）。"""
+    if wind_mps is None:
+        return None
+    return int(round(float(wind_mps) * 3.6))
+
 
 st.set_page_config(page_title="鹿児島エギング指数", layout="wide")
 st.title("鹿児島エギング指数マップ 🎣")
@@ -231,6 +251,8 @@ def load_catch_records() -> list[dict]:
     """Load catch records from the configured database."""
     _ensure_catch_db()
     engine = _catch_records_engine()
+    result: list[dict] = []
+    to_persist: list[dict] = []
     with engine.connect() as conn:
         cur = conn.execute(
             text(
@@ -241,7 +263,6 @@ def load_catch_records() -> list[dict]:
                 """
             )
         )
-        result: list[dict] = []
         for db_row in cur.fetchall():
             rid_val, loc_val, dt_val, size_val, cnt_val, memo_val, path_val, weather_json = db_row
             try:
@@ -250,19 +271,23 @@ def load_catch_records() -> list[dict]:
                 weather = {}
             if not isinstance(weather, dict):
                 weather = {}
-            result.append(
-                {
-                    "id": rid_val,
-                    "location": loc_val,
-                    "datetime": dt_val,
-                    "size_cm": float(size_val),
-                    "count": int(cnt_val),
-                    "memo": memo_val or "",
-                    "photo_path": path_val,
-                    "weather": weather,
-                }
-            )
-        return result
+            weather, changed = normalize_catch_weather_wind(weather)
+            record = {
+                "id": rid_val,
+                "location": loc_val,
+                "datetime": dt_val,
+                "size_cm": float(size_val),
+                "count": int(cnt_val),
+                "memo": memo_val or "",
+                "photo_path": path_val,
+                "weather": weather,
+            }
+            result.append(record)
+            if changed:
+                to_persist.append(record)
+    for record in to_persist:
+        upsert_catch_record(record)
+    return result
 
 
 def count_catch_records() -> int:
@@ -386,7 +411,7 @@ with col_left:
             f"{name}<br>"
             f"本日ランク: {eval_today['rank']} ({eval_today['total_score']}点)<br>"
             f"潮: {eval_today['tide_type']} / "
-            f"風: {eval_today['wind_mps']}m/s / 波: {eval_today['wave_m']}m"
+            f"風: {format_wind_display(eval_today['wind_mps'])} / 波: {eval_today['wave_m']}m"
         )
         folium.Marker(
             location=point_coords,
@@ -415,7 +440,7 @@ with col_right:
     st.metric("総合ランク", today_result["rank"])
     st.metric("総合スコア", f"{today_result['total_score']} / 100")
     st.write(
-        f"潮: **{today_result['tide_type']}** / 風: **{today_result['wind_mps']} m/s** / "
+        f"潮: **{today_result['tide_type']}** / 風: **{format_wind_display(today_result['wind_mps'])}** / "
         f"波: **{today_result['wave_m']} m** / 水温: **{today_result['water_temp']} ℃**"
     )
 
@@ -434,6 +459,7 @@ forecast_df = pd.DataFrame(
             "ランク": fc["rank"],
             "総合スコア": fc["total_score"],
             "潮傾向": fc["tide_type"],
+            "風(km/h)": wind_kmh(fc["wind_mps"]),
             "風(m/s)": fc["wind_mps"],
             "波(m)": fc["wave_m"],
             "水温(℃)": fc["water_temp"],
@@ -444,8 +470,9 @@ forecast_df = pd.DataFrame(
 )
 st.dataframe(forecast_df, use_container_width=True, hide_index=True)
 st.caption(
-    "※ 風速・気圧は Open-Meteo Forecast API、波高・海面水温・海面高度（潮汐を含むモデル）は "
-    "Open-Meteo Marine API の無料予報データを使用しています。実釣前に最新情報を再確認してください。"
+    "※ 風速は地上10m・気圧は Open-Meteo Forecast API（風速は m/s で取得し km/h も併記）、"
+    "波高・海面水温・海面高度（潮汐を含むモデル）は Open-Meteo Marine API の無料予報です。"
+    "実釣前に最新情報を再確認してください。"
 )
 
 st.divider()
@@ -530,6 +557,7 @@ else:
                 "water_temp": None,
                 "pressure_hpa": None,
                 "sea_level_m": None,
+                CATCH_WEATHER_WIND_UNIT_KEY: "ms",
             }
         try:
             photo_path = save_uploaded_image(squid_photo)
@@ -642,6 +670,7 @@ else:
                             "water_temp": None,
                             "pressure_hpa": None,
                             "sea_level_m": None,
+                            CATCH_WEATHER_WIND_UNIT_KEY: "ms",
                         }
                     old = record_items[store_idx]
                     try:
@@ -738,6 +767,7 @@ else:
                         "ポイント": hist["location"],
                         "杯数": hist["count"],
                         "胴長(cm)": hist["size_cm"],
+                        "風(km/h)": wind_kmh(hist["weather"].get("wind_mps")),
                         "風(m/s)": hist["weather"].get("wind_mps"),
                         "波(m)": hist["weather"].get("wave_m"),
                         "水温(℃)": hist["weather"].get("water_temp"),
