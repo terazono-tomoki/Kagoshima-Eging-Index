@@ -414,7 +414,8 @@ with col_left:
             f"{name}<br>"
             f"本日ランク: {eval_today['rank']} ({eval_today['total_score']}点)<br>"
             f"潮: {eval_today['tide_type']} / "
-            f"風: {format_wind_display(eval_today['wind_mps'])} / 波: {eval_today['wave_m']}m"
+            f"風: {format_wind_display(eval_today['wind_mps'])} / "
+            f"波: {eval_today['wave_m']}m"
         )
         folium.Marker(
             location=point_coords,
@@ -442,9 +443,13 @@ with col_right:
     st.subheader("指定したポイントの評価")
     st.metric("総合ランク", today_result["rank"])
     st.metric("総合スコア", f"{today_result['total_score']} / 100")
+    tide = today_result["tide_type"]
+    wind = format_wind_display(today_result["wind_mps"])
+    wave = today_result["wave_m"]
+    water_temp = today_result["water_temp"]
     st.write(
-        f"潮: **{today_result['tide_type']}** / 風: **{format_wind_display(today_result['wind_mps'])}** / "
-        f"波: **{today_result['wave_m']} m** / 水温: **{today_result['water_temp']} ℃**"
+        f"潮: **{tide}** / 風: **{wind}** / "
+        f"波: **{wave} m** / 水温: **{water_temp} ℃**"
     )
 
     detail_df = pd.DataFrame(
