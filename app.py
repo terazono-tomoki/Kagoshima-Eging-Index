@@ -41,6 +41,18 @@ def format_wind_display(wind_mps: float | None) -> str:
     return f"{kmh} km/h（{mps_text} m/s）"
 
 
+def format_point_conditions_markdown(result: dict) -> str:
+    """本日評価パネル用の潮・風・波・水温サマリー（Markdown）。"""
+    tide = result["tide_type"]
+    wind = format_wind_display(result["wind_mps"])
+    wave = result["wave_m"]
+    water_temp = result["water_temp"]
+    return (
+        f"潮: **{tide}** / 風: **{wind}** / "
+        f"波: **{wave} m** / 水温: **{water_temp} ℃**"
+    )
+
+
 def forecast_weather_for_compare(forecast_row: dict) -> dict:
     """予測結果 dict から実績比較用の気象フィールドだけを取り出す。"""
     return {
@@ -443,14 +455,7 @@ with col_right:
     st.subheader("指定したポイントの評価")
     st.metric("総合ランク", today_result["rank"])
     st.metric("総合スコア", f"{today_result['total_score']} / 100")
-    tide = today_result["tide_type"]
-    wind = format_wind_display(today_result["wind_mps"])
-    wave = today_result["wave_m"]
-    water_temp = today_result["water_temp"]
-    st.write(
-        f"潮: **{tide}** / 風: **{wind}** / "
-        f"波: **{wave} m** / 水温: **{water_temp} ℃**"
-    )
+    st.write(format_point_conditions_markdown(today_result))
 
     detail_df = pd.DataFrame(
         [{"項目": key, "スコア": value} for key, value in today_result["detail"].items()]
