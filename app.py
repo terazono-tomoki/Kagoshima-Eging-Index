@@ -68,7 +68,7 @@ st.title("鹿児島エギング指数マップ 🎣")
 st.caption("選択したポイントを対象に、エギング向けの釣りやすさを独自ロジックで判定します。")
 
 locations = {
-    "東風泊": [31.074, 130.783],
+    "東風泊": [31.341081, 131.068983],
     "佐多岬": [30.994, 130.660],
 }
 
@@ -399,419 +399,456 @@ def index_of_record_in_store(store: list[dict], record: dict) -> int:
 
 today = date.today()
 location_options = list(locations.keys())
-st.sidebar.radio(
-    "表示するポイント",
-    location_options,
-    key="point_selector",
-)
-current_point = st.session_state["point_selector"]
-st.sidebar.caption(f"現在の選択: {current_point}")
+if "point_selector" not in st.session_state:
+    st.session_state.point_selector = location_options[0]
 
-col_left, col_right = st.columns([1.4, 1.0])
+tab_forecast, tab_catch = st.tabs(["エギング指数・予測", "釣果ログ"])
 
-with col_left:
-    m = folium.Map(location=[31.3, 130.6], zoom_start=9)
-
-    for name, point_coords in locations.items():
-        try:
-            location_forecast = weekly_forecast(name, locations, days=7)
-            eval_today = next(
-                (fc for fc in location_forecast if fc["date"] == today),
-                location_forecast[0],
-            )
-        except (urllib.error.URLError, TimeoutError, ValueError, KeyError):
-            # 一部ポイントの取得失敗時もUI全体は維持する
-            continue
-        popup_text = (
-            f"{name}<br>"
-            f"本日ランク: {eval_today['rank']} ({eval_today['total_score']}点)<br>"
-            f"潮: {eval_today['tide_type']} / "
-            f"風: {format_wind_display(eval_today['wind_mps'])} / "
-            f"波: {eval_today['wave_m']}m"
-        )
-        folium.Marker(
-            location=point_coords,
-            popup=folium.Popup(popup_text, max_width=300),
-            tooltip=f"{name} | {eval_today['rank']}",
-            icon=folium.Icon(color=rank_color(eval_today["rank"]), icon="info-sign"),
-        ).add_to(m)
-
-    st.subheader("鹿児島エギング指数マップ（本日ランク付き）")
-    st_folium(m, width=900, height=620)
-
-try:
-    forecast = weekly_forecast(current_point, locations, days=7)
-except (urllib.error.URLError, TimeoutError, ValueError, KeyError) as error:
-    st.error(
-        "Open-Meteoから天候データを取得できませんでした。"
-        "時間をおいて再試行してください。"
+with tab_forecast:
+    st.radio(
+        "表示するポイント",
+        location_options,
+        key="point_selector",
+        horizontal=True,
     )
-    st.exception(error)
-    st.stop()
+    current_point = st.session_state["point_selector"]
+    st.caption(f"現在の選択: {current_point}")
 
-today_result = next((fc for fc in forecast if fc["date"] == today), forecast[0])
+    col_left, col_right = st.columns([1.4, 1.0])
 
-with col_right:
-    st.subheader("指定したポイントの評価")
-    st.metric("総合ランク", today_result["rank"])
-    st.metric("総合スコア", f"{today_result['total_score']} / 100")
-    st.write(format_point_conditions_markdown(today_result))
+    with col_left:
+        m = folium.Map(location=[31.3, 130.6], zoom_start=9)
 
-    detail_df = pd.DataFrame(
-        [{"項目": key, "スコア": value} for key, value in today_result["detail"].items()]
-    )
-    st.caption("評価内訳（エギング専用ロジック）")
-    st.dataframe(detail_df, use_container_width=True, hide_index=True)
+        for name, point_coords in locations.items():
+            try:
+                location_forecast = weekly_forecast(name, locations, days=7)
+                eval_today = next(
+                    (fc for fc in location_forecast if fc["date"] == today),
+                    location_forecast[0],
+                )
+            except (urllib.error.URLError, TimeoutError, ValueError, KeyError):
+                # 一部ポイントの取得失敗時もUI全体は維持する
+                continue
+            popup_text = (
+                f"{name}<br>"
+                f"本日ランク: {eval_today['rank']} ({eval_today['total_score']}点)<br>"
+                f"潮: {eval_today['tide_type']} / "
+                f"風: {format_wind_display(eval_today['wind_mps'])} / "
+                f"波: {eval_today['wave_m']}m"
+            )
+            folium.Marker(
+                location=point_coords,
+                popup=folium.Popup(popup_text, max_width=300),
+                tooltip=f"{name} | {eval_today['rank']}",
+                icon=folium.Icon(color=rank_color(eval_today["rank"]), icon="info-sign"),
+            ).add_to(m)
 
-st.subheader("本日から1週間の予測")
-forecast_df = pd.DataFrame(
-    [
-        {
-            "日付": fc["date"].strftime("%m/%d"),
-            "ポイント": fc["location"],
-            "ランク": fc["rank"],
-            "総合スコア": fc["total_score"],
-            "潮傾向": fc["tide_type"],
-            "風": format_wind_display(fc["wind_mps"]),
-            "波(m)": fc["wave_m"],
-            "水温(℃)": fc["water_temp"],
-            "気圧(hPa)": fc["pressure_hpa"],
-        }
-        for fc in forecast
-    ]
-)
-st.dataframe(forecast_df, use_container_width=True, hide_index=True)
-st.caption(
-    "※ 風速は地上10m・気圧は Open-Meteo Forecast API（風速は m/s で取得し km/h も併記）、"
-    "波高・海面水温・海面高度（潮汐を含むモデル）は Open-Meteo Marine API の無料予報です。"
-    "実釣前に最新情報を再確認してください。"
-)
+        st.subheader("鹿児島エギング指数マップ（本日ランク付き）")
+        st_folium(m, width=900, height=620)
 
-st.divider()
-st.subheader("釣果ログ（写真 + 日時 + 気象）")
-
-if not RECORDS_SECTION_PASSWORD:
-    st.warning(
-        "記録欄パスワードが未設定です。"
-        ".streamlit/secrets.toml に records_section_password を設定してください。"
-    )
-    _n_saved = count_catch_records()
-    if _n_saved:
-        st.info(
-            f"{catch_records_storage_hint()} には釣果が **{_n_saved} 件**保存されています。"
-            "一覧や編集を表示するには、上記のとおりパスワードを設定し、記録欄にログインしてください。"
+    try:
+        forecast = weekly_forecast(current_point, locations, days=7)
+    except (urllib.error.URLError, TimeoutError, ValueError, KeyError) as error:
+        st.error(
+            "Open-Meteoから天候データを取得できませんでした。"
+            "時間をおいて再試行してください。"
         )
-elif not st.session_state.get("records_auth_unlocked"):
-    st.caption("釣果の閲覧・保存にはパスワードが必要です。")
-    _n_saved = count_catch_records()
-    if _n_saved:
-        st.info(
-            f"保存済みの釣果は **{_n_saved} 件**です。"
-            "下のフォームでログインすると一覧・編集・削除ができます。"
-        )
-    with st.form("records_auth_form"):
-        gate_pw = st.text_input("パスワード", type="password")
-        gate_submit = st.form_submit_button("ログイン")
-    if gate_submit:
-        if gate_pw == str(RECORDS_SECTION_PASSWORD):
-            st.session_state.records_auth_unlocked = True
-            st.rerun()
-        else:
-            st.error("パスワードが違います。")
-else:
-    if st.button("ログアウト（記録欄を隠す）"):
-        st.session_state.records_auth_unlocked = False
-        st.rerun()
+        st.exception(error)
+    else:
+        today_result = next((fc for fc in forecast if fc["date"] == today), forecast[0])
 
-    save_notice = st.session_state.pop("catch_save_notice", None)
-    if save_notice:
-        st.success(save_notice)
+        with col_right:
+            st.subheader("指定したポイントの評価")
+            st.metric("総合ランク", today_result["rank"])
+            st.metric("総合スコア", f"{today_result['total_score']} / 100")
+            st.write(format_point_conditions_markdown(today_result))
 
-    record_items = load_catch_records()
-    record_eval_label, record_eval_text = evaluate_from_catch_records(
-        current_point,
-        forecast_weather_for_compare(today_result),
-        record_items,
-    )
-    st.info(f"釣果ログ実績評価: {record_eval_label} - {record_eval_text}")
-    if not _photo_storage_enabled():
-        st.caption(
-            "釣果の「行データ」は PostgreSQL に保存されています。"
-            "写真はローカルフォルダのみのため、Streamlit Cloud では再デプロイ後に画像が失われます。"
-            "photo_storage_s3_* を設定すると写真も永続化できます。"
-        )
-
-    with st.form("catch_log_form", clear_on_submit=True):
-        record_col1, record_col2 = st.columns(2)
-        with record_col1:
-            catch_location = st.selectbox(
-                "釣れたポイント", list(locations.keys()), key="catch_location"
-            )
-            catch_date = st.date_input("釣れた日", value=today, key="catch_date")
-            catch_time = st.time_input("釣れた時刻", value=time(20, 0), key="catch_time")
-        with record_col2:
-            squid_size = st.number_input(
-                "胴長(cm)", min_value=5.0, max_value=70.0, value=20.0, step=0.5
-            )
-            squid_count = st.number_input(
-                "杯数", min_value=1, max_value=30, value=1, step=1
-            )
-            memo = st.text_area("メモ", placeholder="ヒットエギ・レンジ・潮位など")
-        squid_photo = st.file_uploader(
-            "イカ写真をアップロード", type=["jpg", "jpeg", "png", "webp"]
-        )
-        submit_record = st.form_submit_button("釣果ログを保存")
-
-    if submit_record:
-        catch_datetime = datetime.combine(catch_date, catch_time)
-        try:
-            weather_snapshot = get_weather_snapshot(
-                locations[catch_location], catch_datetime
-            )
-        except (urllib.error.URLError, TimeoutError, ValueError, KeyError):
-            weather_snapshot = {
-                "wind_mps": None,
-                "wave_m": None,
-                "water_temp": None,
-                "pressure_hpa": None,
-                "sea_level_m": None,
-                CATCH_WEATHER_WIND_UNIT_KEY: "ms",
-            }
-        try:
-            photo_path = save_uploaded_image(squid_photo)
-        except ClientError as exc:
-            st.error("オブジェクトストレージへの写真アップロードに失敗しました。")
-            st.exception(exc)
-            st.stop()
-        new_record = {
-            "id": uuid.uuid4().hex,
-            "location": catch_location,
-            "datetime": catch_datetime.isoformat(timespec="minutes"),
-            "size_cm": float(squid_size),
-            "count": int(squid_count),
-            "memo": memo.strip(),
-            "photo_path": photo_path,
-            "weather": weather_snapshot,
-        }
-        try:
-            upsert_catch_record(new_record)
-        except SQLAlchemyError as exc:
-            st.error("データベースへの保存に失敗しました。")
-            st.exception(exc)
-        else:
-            st.session_state["catch_save_notice"] = (
-                "釣果ログを保存しました。"
-                f"（気象: 風 {format_wind_display(weather_snapshot.get('wind_mps'))} / "
-                f"波 {weather_snapshot.get('wave_m')} m / "
-                f"水温 {weather_snapshot.get('water_temp')} ℃）"
-            )
-            st.rerun()
-
-    if record_items:
-        sorted_records = sorted(record_items, key=lambda log: log["datetime"], reverse=True)
-
-        with st.expander("ログ編集", expanded=False):
-            with st.form("edit_record_form"):
-                edit_idx = st.selectbox(
-                    "編集するログ",
-                    options=list(range(len(sorted_records))),
-                    format_func=lambda idx: (
-                        f"{sorted_records[idx]['datetime'].replace('T', ' ')} | "
-                        f"{sorted_records[idx]['location']} | "
-                        f"{sorted_records[idx].get('count', '?')}杯"
-                    ),
-                )
-                rec_before = sorted_records[edit_idx]
-                dt_parsed = parse_record_datetime(rec_before)
-                loc_keys = list(locations.keys())
-                loc_index = (
-                    loc_keys.index(rec_before["location"])
-                    if rec_before.get("location") in locations
-                    else 0
-                )
-                ed_location = st.selectbox(
-                    "釣れたポイント", loc_keys, index=loc_index, key=f"ed_loc_{edit_idx}"
-                )
-                ed_date = st.date_input(
-                    "釣れた日", value=dt_parsed.date(), key=f"ed_date_{edit_idx}"
-                )
-                ed_time = st.time_input(
-                    "釣れた時刻", value=dt_parsed.time(), key=f"ed_time_{edit_idx}"
-                )
-                ed_size = st.number_input(
-                    "胴長(cm)",
-                    min_value=5.0,
-                    max_value=70.0,
-                    value=float(rec_before.get("size_cm", 20.0)),
-                    step=0.5,
-                    key=f"ed_size_{edit_idx}",
-                )
-                ed_count = st.number_input(
-                    "杯数",
-                    min_value=1,
-                    max_value=30,
-                    value=int(rec_before.get("count", 1)),
-                    step=1,
-                    key=f"ed_count_{edit_idx}",
-                )
-                ed_memo = st.text_area(
-                    "メモ",
-                    value=rec_before.get("memo", ""),
-                    placeholder="ヒットエギ・レンジ・潮位など",
-                    key=f"ed_memo_{edit_idx}",
-                )
-                existing_preview = photo_display_url(rec_before.get("photo_path"))
-                if existing_preview:
-                    st.caption("現在の写真")
-                    st.image(existing_preview, width=280)
-                ed_photo = st.file_uploader(
-                    "新しい写真に差し替え（未選択ならそのまま）",
-                    type=["jpg", "jpeg", "png", "webp"],
-                    key=f"ed_photo_{edit_idx}",
-                )
-                delete_photo_on_edit = st.checkbox(
-                    "写真を削除する（ローカル／オブジェクトストレージからも削除）",
-                    value=False,
-                    key=f"ed_delphoto_{edit_idx}",
-                )
-                submit_edit = st.form_submit_button("この内容で更新")
-
-            if submit_edit:
-                store_idx = index_of_record_in_store(record_items, rec_before)
-                if store_idx < 0:
-                    st.error("更新対象のログが見つかりませんでした。")
-                else:
-                    catch_dt = datetime.combine(ed_date, ed_time)
-                    try:
-                        weather_snapshot = get_weather_snapshot(
-                            locations[ed_location], catch_dt
-                        )
-                    except (urllib.error.URLError, TimeoutError, ValueError, KeyError):
-                        weather_snapshot = {
-                            "wind_mps": None,
-                            "wave_m": None,
-                            "water_temp": None,
-                            "pressure_hpa": None,
-                            "sea_level_m": None,
-                            CATCH_WEATHER_WIND_UNIT_KEY: "ms",
-                        }
-                    old = record_items[store_idx]
-                    try:
-                        photo_stored = _photo_path_after_edit(
-                            ed_photo, delete_photo_on_edit, old
-                        )
-                    except ClientError as exc:
-                        st.error("オブジェクトストレージへの写真アップロードに失敗しました。")
-                        st.exception(exc)
-                        st.stop()
-                    record_id = old.get("id") or uuid.uuid4().hex
-                    updated = {
-                        "id": record_id,
-                        "location": ed_location,
-                        "datetime": catch_dt.isoformat(timespec="minutes"),
-                        "size_cm": float(ed_size),
-                        "count": int(ed_count),
-                        "memo": ed_memo.strip(),
-                        "photo_path": photo_stored,
-                        "weather": weather_snapshot,
-                    }
-                    record_items[store_idx] = updated
-                    try:
-                        upsert_catch_record(updated)
-                    except SQLAlchemyError as exc:
-                        st.error("データベースへの保存に失敗しました。")
-                        st.exception(exc)
-                    else:
-                        st.success("ログを更新しました。")
-                        st.rerun()
-
-        with st.expander("ログ削除", expanded=False):
-            with st.form("delete_record_form"):
-                delete_idx = st.selectbox(
-                    "削除するログ",
-                    options=list(range(len(sorted_records))),
-                    format_func=lambda idx: (
-                        f"{sorted_records[idx]['datetime'].replace('T', ' ')} | "
-                        f"{sorted_records[idx]['location']} | "
-                        f"{sorted_records[idx]['count']}杯"
-                    ),
-                )
-                delete_photo_file = st.checkbox(
-                    "このログの写真ファイルも削除する", value=True
-                )
-                submit_delete = st.form_submit_button("選択したログを削除")
-
-            if submit_delete:
-                target_record = sorted_records[delete_idx]
-                target_photo_path = target_record.get("photo_path")
-                rid = target_record.get("id")
-                if not rid:
-                    st.error(
-                        "削除できません（ログに ID がありません）。"
-                        "一覧を再表示してから再度お試しください。"
-                    )
-                else:
-                    if delete_photo_file and target_photo_path:
-                        delete_stored_photo(target_photo_path)
-                    try:
-                        delete_catch_record(rid)
-                    except SQLAlchemyError as exc:
-                        st.error("データベースからの削除に失敗しました。")
-                        st.exception(exc)
-                    else:
-                        st.success("ログを削除しました。")
-                        st.rerun()
-
-        filter_col1, filter_col2 = st.columns([1.1, 1.4])
-        with filter_col1:
-            date_filter_enabled = st.checkbox("日付で絞り込む", value=False)
-        with filter_col2:
-            filter_date = st.date_input("表示する日付", value=today, disabled=not date_filter_enabled)
-
-        if date_filter_enabled:
-            displayed_records = []
-            for log in sorted_records:
-                try:
-                    log_date = datetime.fromisoformat(log["datetime"]).date()
-                except (TypeError, ValueError):
-                    continue
-                if log_date == filter_date:
-                    displayed_records.append(log)
-        else:
-            displayed_records = sorted_records
-
-        if not displayed_records:
-            st.info("指定日の釣果ログはありません。")
-        else:
-            history_df = pd.DataFrame(
+            detail_df = pd.DataFrame(
                 [
-                    {
-                        "日時": hist["datetime"].replace("T", " "),
-                        "ポイント": hist["location"],
-                        "杯数": hist["count"],
-                        "胴長(cm)": hist["size_cm"],
-                        "風": format_wind_display(hist["weather"].get("wind_mps")),
-                        "波(m)": hist["weather"].get("wave_m"),
-                        "水温(℃)": hist["weather"].get("water_temp"),
-                        "気圧(hPa)": hist["weather"].get("pressure_hpa"),
-                        "海面高度(m)": hist["weather"].get("sea_level_m"),
-                        "メモ": hist["memo"],
-                    }
-                    for hist in displayed_records
+                    {"項目": key, "スコア": value}
+                    for key, value in today_result["detail"].items()
                 ]
             )
-            st.dataframe(history_df, use_container_width=True, hide_index=True)
+            st.caption("評価内訳（エギング専用ロジック）")
+            st.dataframe(detail_df, use_container_width=True, hide_index=True)
 
-            st.caption("最新の釣果写真")
-            photo_cols = st.columns(3)
-            photo_idx = 0
-            for hist in displayed_records:
-                img_src = photo_display_url(hist.get("photo_path"))
-                if not img_src:
-                    continue
-                with photo_cols[photo_idx % 3]:
-                    st.image(
-                        img_src,
-                        caption=f"{hist['location']} {hist['datetime'].replace('T', ' ')}",
+        st.subheader("本日から1週間の予測")
+        forecast_df = pd.DataFrame(
+            [
+                {
+                    "日付": fc["date"].strftime("%m/%d"),
+                    "ポイント": fc["location"],
+                    "ランク": fc["rank"],
+                    "総合スコア": fc["total_score"],
+                    "潮傾向": fc["tide_type"],
+                    "風": format_wind_display(fc["wind_mps"]),
+                    "波(m)": fc["wave_m"],
+                    "水温(℃)": fc["water_temp"],
+                    "気圧(hPa)": fc["pressure_hpa"],
+                }
+                for fc in forecast
+            ]
+        )
+        st.dataframe(forecast_df, use_container_width=True, hide_index=True)
+        st.caption(
+            "※ 風速は地上10m・気圧は Open-Meteo Forecast API（風速は m/s で取得し km/h も併記）、"
+            "波高・海面水温・海面高度（潮汐を含むモデル）は Open-Meteo Marine API の無料予報です。"
+            "実釣前に最新情報を再確認してください。"
+        )
+
+with tab_catch:
+    st.subheader("釣果ログ（写真 + 日時 + 気象）")
+    eval_point = st.session_state.get("point_selector", location_options[0])
+    try:
+        eval_forecast = weekly_forecast(eval_point, locations, days=7)
+        eval_today_result = next(
+            (fc for fc in eval_forecast if fc["date"] == today),
+            eval_forecast[0],
+        )
+    except (urllib.error.URLError, TimeoutError, ValueError, KeyError):
+        eval_today_result = None
+
+    if not RECORDS_SECTION_PASSWORD:
+        st.warning(
+            "記録欄パスワードが未設定です。"
+            ".streamlit/secrets.toml に records_section_password を設定してください。"
+        )
+        _n_saved = count_catch_records()
+        if _n_saved:
+            st.info(
+                f"{catch_records_storage_hint()} には釣果が **{_n_saved} 件**保存されています。"
+                "一覧や編集を表示するには、上記のとおりパスワードを設定し、記録欄にログインしてください。"
+            )
+    elif not st.session_state.get("records_auth_unlocked"):
+        st.caption("釣果の閲覧・保存にはパスワードが必要です。")
+        _n_saved = count_catch_records()
+        if _n_saved:
+            st.info(
+                f"保存済みの釣果は **{_n_saved} 件**です。"
+                "下のフォームでログインすると一覧・編集・削除ができます。"
+            )
+        with st.form("records_auth_form"):
+            gate_pw = st.text_input("パスワード", type="password")
+            gate_submit = st.form_submit_button("ログイン")
+        if gate_submit:
+            if gate_pw == str(RECORDS_SECTION_PASSWORD):
+                st.session_state.records_auth_unlocked = True
+                st.rerun()
+            else:
+                st.error("パスワードが違います。")
+    else:
+        if st.button("ログアウト（記録欄を隠す）"):
+            st.session_state.records_auth_unlocked = False
+            st.rerun()
+
+        save_notice = st.session_state.pop("catch_save_notice", None)
+        if save_notice:
+            st.success(save_notice)
+
+        record_items = load_catch_records()
+        if eval_today_result is not None:
+            record_eval_label, record_eval_text = evaluate_from_catch_records(
+                eval_point,
+                forecast_weather_for_compare(eval_today_result),
+                record_items,
+            )
+            st.info(
+                f"釣果ログ実績評価（{eval_point}）: {record_eval_label} - {record_eval_text}"
+            )
+        else:
+            st.warning("天候データを取得できないため、釣果ログ実績評価を表示できません。")
+        if not _photo_storage_enabled():
+            st.caption(
+                "釣果の「行データ」は PostgreSQL に保存されています。"
+                "写真はローカルフォルダのみのため、Streamlit Cloud では再デプロイ後に画像が失われます。"
+                "photo_storage_s3_* を設定すると写真も永続化できます。"
+            )
+
+        with st.form("catch_log_form", clear_on_submit=True):
+            record_col1, record_col2 = st.columns(2)
+            with record_col1:
+                catch_location = st.selectbox(
+                    "釣れたポイント", list(locations.keys()), key="catch_location"
+                )
+                catch_date = st.date_input("釣れた日", value=today, key="catch_date")
+                catch_time = st.time_input(
+                    "釣れた時刻", value=time(20, 0), key="catch_time"
+                )
+            with record_col2:
+                squid_size = st.number_input(
+                    "胴長(cm)", min_value=5.0, max_value=70.0, value=20.0, step=0.5
+                )
+                squid_count = st.number_input(
+                    "杯数", min_value=1, max_value=30, value=1, step=1
+                )
+                memo = st.text_area("メモ", placeholder="ヒットエギ・レンジ・潮位など")
+            squid_photo = st.file_uploader(
+                "イカ写真をアップロード", type=["jpg", "jpeg", "png", "webp"]
+            )
+            submit_record = st.form_submit_button("釣果ログを保存")
+
+        if submit_record:
+            catch_datetime = datetime.combine(catch_date, catch_time)
+            try:
+                weather_snapshot = get_weather_snapshot(
+                    locations[catch_location], catch_datetime
+                )
+            except (urllib.error.URLError, TimeoutError, ValueError, KeyError):
+                weather_snapshot = {
+                    "wind_mps": None,
+                    "wave_m": None,
+                    "water_temp": None,
+                    "pressure_hpa": None,
+                    "sea_level_m": None,
+                    CATCH_WEATHER_WIND_UNIT_KEY: "ms",
+                }
+            try:
+                photo_path = save_uploaded_image(squid_photo)
+            except ClientError as exc:
+                st.error("オブジェクトストレージへの写真アップロードに失敗しました。")
+                st.exception(exc)
+                st.stop()
+            new_record = {
+                "id": uuid.uuid4().hex,
+                "location": catch_location,
+                "datetime": catch_datetime.isoformat(timespec="minutes"),
+                "size_cm": float(squid_size),
+                "count": int(squid_count),
+                "memo": memo.strip(),
+                "photo_path": photo_path,
+                "weather": weather_snapshot,
+            }
+            try:
+                upsert_catch_record(new_record)
+            except SQLAlchemyError as exc:
+                st.error("データベースへの保存に失敗しました。")
+                st.exception(exc)
+            else:
+                st.session_state["catch_save_notice"] = (
+                    "釣果ログを保存しました。"
+                    f"（気象: 風 {format_wind_display(weather_snapshot.get('wind_mps'))} / "
+                    f"波 {weather_snapshot.get('wave_m')} m / "
+                    f"水温 {weather_snapshot.get('water_temp')} ℃）"
+                )
+                st.rerun()
+
+        if record_items:
+            sorted_records = sorted(
+                record_items, key=lambda log: log["datetime"], reverse=True
+            )
+
+            with st.expander("ログ編集", expanded=False):
+                with st.form("edit_record_form"):
+                    edit_idx = st.selectbox(
+                        "編集するログ",
+                        options=list(range(len(sorted_records))),
+                        format_func=lambda idx: (
+                            f"{sorted_records[idx]['datetime'].replace('T', ' ')} | "
+                            f"{sorted_records[idx]['location']} | "
+                            f"{sorted_records[idx].get('count', '?')}杯"
+                        ),
                     )
-                photo_idx += 1
+                    rec_before = sorted_records[edit_idx]
+                    dt_parsed = parse_record_datetime(rec_before)
+                    loc_keys = list(locations.keys())
+                    loc_index = (
+                        loc_keys.index(rec_before["location"])
+                        if rec_before.get("location") in locations
+                        else 0
+                    )
+                    ed_location = st.selectbox(
+                        "釣れたポイント",
+                        loc_keys,
+                        index=loc_index,
+                        key=f"ed_loc_{edit_idx}",
+                    )
+                    ed_date = st.date_input(
+                        "釣れた日", value=dt_parsed.date(), key=f"ed_date_{edit_idx}"
+                    )
+                    ed_time = st.time_input(
+                        "釣れた時刻", value=dt_parsed.time(), key=f"ed_time_{edit_idx}"
+                    )
+                    ed_size = st.number_input(
+                        "胴長(cm)",
+                        min_value=5.0,
+                        max_value=70.0,
+                        value=float(rec_before.get("size_cm", 20.0)),
+                        step=0.5,
+                        key=f"ed_size_{edit_idx}",
+                    )
+                    ed_count = st.number_input(
+                        "杯数",
+                        min_value=1,
+                        max_value=30,
+                        value=int(rec_before.get("count", 1)),
+                        step=1,
+                        key=f"ed_count_{edit_idx}",
+                    )
+                    ed_memo = st.text_area(
+                        "メモ",
+                        value=rec_before.get("memo", ""),
+                        placeholder="ヒットエギ・レンジ・潮位など",
+                        key=f"ed_memo_{edit_idx}",
+                    )
+                    existing_preview = photo_display_url(rec_before.get("photo_path"))
+                    if existing_preview:
+                        st.caption("現在の写真")
+                        st.image(existing_preview, width=280)
+                    ed_photo = st.file_uploader(
+                        "新しい写真に差し替え（未選択ならそのまま）",
+                        type=["jpg", "jpeg", "png", "webp"],
+                        key=f"ed_photo_{edit_idx}",
+                    )
+                    delete_photo_on_edit = st.checkbox(
+                        "写真を削除する（ローカル／オブジェクトストレージからも削除）",
+                        value=False,
+                        key=f"ed_delphoto_{edit_idx}",
+                    )
+                    submit_edit = st.form_submit_button("この内容で更新")
+
+                if submit_edit:
+                    store_idx = index_of_record_in_store(record_items, rec_before)
+                    if store_idx < 0:
+                        st.error("更新対象のログが見つかりませんでした。")
+                    else:
+                        catch_dt = datetime.combine(ed_date, ed_time)
+                        try:
+                            weather_snapshot = get_weather_snapshot(
+                                locations[ed_location], catch_dt
+                            )
+                        except (urllib.error.URLError, TimeoutError, ValueError, KeyError):
+                            weather_snapshot = {
+                                "wind_mps": None,
+                                "wave_m": None,
+                                "water_temp": None,
+                                "pressure_hpa": None,
+                                "sea_level_m": None,
+                                CATCH_WEATHER_WIND_UNIT_KEY: "ms",
+                            }
+                        old = record_items[store_idx]
+                        try:
+                            photo_stored = _photo_path_after_edit(
+                                ed_photo, delete_photo_on_edit, old
+                            )
+                        except ClientError as exc:
+                            st.error(
+                                "オブジェクトストレージへの写真アップロードに失敗しました。"
+                            )
+                            st.exception(exc)
+                            st.stop()
+                        record_id = old.get("id") or uuid.uuid4().hex
+                        updated = {
+                            "id": record_id,
+                            "location": ed_location,
+                            "datetime": catch_dt.isoformat(timespec="minutes"),
+                            "size_cm": float(ed_size),
+                            "count": int(ed_count),
+                            "memo": ed_memo.strip(),
+                            "photo_path": photo_stored,
+                            "weather": weather_snapshot,
+                        }
+                        record_items[store_idx] = updated
+                        try:
+                            upsert_catch_record(updated)
+                        except SQLAlchemyError as exc:
+                            st.error("データベースへの保存に失敗しました。")
+                            st.exception(exc)
+                        else:
+                            st.success("ログを更新しました。")
+                            st.rerun()
+
+            with st.expander("ログ削除", expanded=False):
+                with st.form("delete_record_form"):
+                    delete_idx = st.selectbox(
+                        "削除するログ",
+                        options=list(range(len(sorted_records))),
+                        format_func=lambda idx: (
+                            f"{sorted_records[idx]['datetime'].replace('T', ' ')} | "
+                            f"{sorted_records[idx]['location']} | "
+                            f"{sorted_records[idx]['count']}杯"
+                        ),
+                    )
+                    delete_photo_file = st.checkbox(
+                        "このログの写真ファイルも削除する", value=True
+                    )
+                    submit_delete = st.form_submit_button("選択したログを削除")
+
+                if submit_delete:
+                    target_record = sorted_records[delete_idx]
+                    target_photo_path = target_record.get("photo_path")
+                    rid = target_record.get("id")
+                    if not rid:
+                        st.error(
+                            "削除できません（ログに ID がありません）。"
+                            "一覧を再表示してから再度お試しください。"
+                        )
+                    else:
+                        if delete_photo_file and target_photo_path:
+                            delete_stored_photo(target_photo_path)
+                        try:
+                            delete_catch_record(rid)
+                        except SQLAlchemyError as exc:
+                            st.error("データベースからの削除に失敗しました。")
+                            st.exception(exc)
+                        else:
+                            st.success("ログを削除しました。")
+                            st.rerun()
+
+            filter_col1, filter_col2 = st.columns([1.1, 1.4])
+            with filter_col1:
+                date_filter_enabled = st.checkbox("日付で絞り込む", value=False)
+            with filter_col2:
+                filter_date = st.date_input(
+                    "表示する日付", value=today, disabled=not date_filter_enabled
+                )
+
+            if date_filter_enabled:
+                displayed_records = []
+                for log in sorted_records:
+                    try:
+                        log_date = datetime.fromisoformat(log["datetime"]).date()
+                    except (TypeError, ValueError):
+                        continue
+                    if log_date == filter_date:
+                        displayed_records.append(log)
+            else:
+                displayed_records = sorted_records
+
+            if not displayed_records:
+                st.info("指定日の釣果ログはありません。")
+            else:
+                history_df = pd.DataFrame(
+                    [
+                        {
+                            "日時": hist["datetime"].replace("T", " "),
+                            "ポイント": hist["location"],
+                            "杯数": hist["count"],
+                            "胴長(cm)": hist["size_cm"],
+                            "風": format_wind_display(hist["weather"].get("wind_mps")),
+                            "波(m)": hist["weather"].get("wave_m"),
+                            "水温(℃)": hist["weather"].get("water_temp"),
+                            "気圧(hPa)": hist["weather"].get("pressure_hpa"),
+                            "海面高度(m)": hist["weather"].get("sea_level_m"),
+                            "メモ": hist["memo"],
+                        }
+                        for hist in displayed_records
+                    ]
+                )
+                st.dataframe(history_df, use_container_width=True, hide_index=True)
+
+                st.caption("最新の釣果写真")
+                photo_cols = st.columns(3)
+                photo_idx = 0
+                for hist in displayed_records:
+                    img_src = photo_display_url(hist.get("photo_path"))
+                    if not img_src:
+                        continue
+                    with photo_cols[photo_idx % 3]:
+                        st.image(
+                            img_src,
+                            caption=(
+                                f"{hist['location']} "
+                                f"{hist['datetime'].replace('T', ' ')}"
+                            ),
+                        )
+                    photo_idx += 1
