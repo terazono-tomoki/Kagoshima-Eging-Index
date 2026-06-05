@@ -63,6 +63,18 @@ def forecast_weather_for_compare(forecast_row: dict) -> dict:
     }
 
 
+def today_forecast_for_location(location_name: str, ref_date: date) -> dict | None:
+    """指定ポイントの本日予報を返す。API 取得に失敗したときは None。"""
+    try:
+        forecast_rows = weekly_forecast(location_name, locations, days=7)
+    except (urllib.error.URLError, TimeoutError, ValueError, KeyError):
+        return None
+    return next(
+        (fc for fc in forecast_rows if fc["date"] == ref_date),
+        forecast_rows[0],
+    )
+
+
 st.set_page_config(page_title="鹿児島エギング指数", layout="wide")
 st.title("鹿児島エギング指数マップ 🎣")
 st.caption("選択したポイントを対象に、エギング向けの釣りやすさを独自ロジックで判定します。")
@@ -262,6 +274,29 @@ def _ensure_catch_db() -> None:
         conn.execute(text(_CATCH_RECORDS_DDL))
 
 
+def _catch_record_from_db_row(db_row) -> tuple[dict, bool]:
+    """DB 行を釣果 dict に変換する。天候の正規化があったとき True。"""
+    rid_val, loc_val, dt_val, size_val, cnt_val, memo_val, path_val, weather_json = db_row
+    try:
+        weather = json.loads(weather_json) if weather_json else {}
+    except json.JSONDecodeError:
+        weather = {}
+    if not isinstance(weather, dict):
+        weather = {}
+    weather, changed = normalize_catch_weather_wind(weather)
+    record = {
+        "id": rid_val,
+        "location": loc_val,
+        "datetime": dt_val,
+        "size_cm": float(size_val),
+        "count": int(cnt_val),
+        "memo": memo_val or "",
+        "photo_path": path_val,
+        "weather": weather,
+    }
+    return record, changed
+
+
 def load_catch_records() -> list[dict]:
     """Load catch records from the configured database."""
     _ensure_catch_db()
@@ -279,24 +314,7 @@ def load_catch_records() -> list[dict]:
             )
         )
         for db_row in cur.fetchall():
-            rid_val, loc_val, dt_val, size_val, cnt_val, memo_val, path_val, weather_json = db_row
-            try:
-                weather = json.loads(weather_json) if weather_json else {}
-            except json.JSONDecodeError:
-                weather = {}
-            if not isinstance(weather, dict):
-                weather = {}
-            weather, changed = normalize_catch_weather_wind(weather)
-            record = {
-                "id": rid_val,
-                "location": loc_val,
-                "datetime": dt_val,
-                "size_cm": float(size_val),
-                "count": int(cnt_val),
-                "memo": memo_val or "",
-                "photo_path": path_val,
-                "weather": weather,
-            }
+            record, changed = _catch_record_from_db_row(db_row)
             result.append(record)
             if changed:
                 to_persist.append(record)
@@ -498,15 +516,8 @@ with tab_forecast:
 
 with tab_catch:
     st.subheader("釣果ログ（写真 + 日時 + 気象）")
-    eval_point = st.session_state.get("point_selector", location_options[0])
-    try:
-        eval_forecast = weekly_forecast(eval_point, locations, days=7)
-        eval_today_result = next(
-            (fc for fc in eval_forecast if fc["date"] == today),
-            eval_forecast[0],
-        )
-    except (urllib.error.URLError, TimeoutError, ValueError, KeyError):
-        eval_today_result = None
+    catch_eval_point = st.session_state.get("point_selector", location_options[0])
+    catch_today_forecast = today_forecast_for_location(catch_eval_point, today)
 
     if not RECORDS_SECTION_PASSWORD:
         st.warning(
@@ -546,14 +557,15 @@ with tab_catch:
             st.success(save_notice)
 
         record_items = load_catch_records()
-        if eval_today_result is not None:
+        if catch_today_forecast is not None:
             record_eval_label, record_eval_text = evaluate_from_catch_records(
-                eval_point,
-                forecast_weather_for_compare(eval_today_result),
+                catch_eval_point,
+                forecast_weather_for_compare(catch_today_forecast),
                 record_items,
             )
             st.info(
-                f"釣果ログ実績評価（{eval_point}）: {record_eval_label} - {record_eval_text}"
+                f"釣果ログ実績評価（{catch_eval_point}）: "
+                f"{record_eval_label} - {record_eval_text}"
             )
         else:
             st.warning("天候データを取得できないため、釣果ログ実績評価を表示できません。")
