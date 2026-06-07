@@ -22,6 +22,7 @@ from streamlit_folium import st_folium
 from eging_forecast import (
     CATCH_WEATHER_WIND_UNIT_KEY,
     evaluate_from_catch_records,
+    forecast_weather_for_compare,
     get_weather_snapshot,
     normalize_catch_weather_wind,
     rank_color,
@@ -53,21 +54,13 @@ def format_point_conditions_markdown(result: dict) -> str:
     )
 
 
-def forecast_weather_for_compare(forecast_row: dict) -> dict:
-    """予測結果 dict から実績比較用の気象フィールドだけを取り出す。"""
-    return {
-        "wind_mps": forecast_row["wind_mps"],
-        "wave_m": forecast_row["wave_m"],
-        "water_temp": forecast_row["water_temp"],
-        "pressure_hpa": forecast_row["pressure_hpa"],
-    }
-
-
 def today_forecast_for_location(location_name: str, ref_date: date) -> dict | None:
     """指定ポイントの本日予報を返す。API 取得に失敗したときは None。"""
     try:
         forecast_rows = weekly_forecast(location_name, locations, days=7)
     except (urllib.error.URLError, TimeoutError, ValueError, KeyError):
+        return None
+    if not forecast_rows:
         return None
     return next(
         (fc for fc in forecast_rows if fc["date"] == ref_date),
@@ -557,7 +550,7 @@ with tab_catch:
             st.success(save_notice)
 
         record_items = load_catch_records()
-        if catch_today_forecast is not None:
+        if isinstance(catch_today_forecast, dict):
             record_eval_label, record_eval_text = evaluate_from_catch_records(
                 catch_eval_point,
                 forecast_weather_for_compare(catch_today_forecast),

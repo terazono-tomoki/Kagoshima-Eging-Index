@@ -172,11 +172,37 @@ def _weather_metric(value, fallback: float) -> float:
         return fallback
 
 
+def forecast_weather_for_compare(forecast_row: dict) -> dict:
+    """予測結果 dict から実績比較用の気象フィールドだけを取り出す。"""
+    if not isinstance(forecast_row, dict):
+        return {
+            "wind_mps": None,
+            "wave_m": None,
+            "water_temp": None,
+            "pressure_hpa": None,
+        }
+    return {
+        "wind_mps": forecast_row.get("wind_mps"),
+        "wave_m": forecast_row.get("wave_m"),
+        "water_temp": forecast_row.get("water_temp"),
+        "pressure_hpa": forecast_row.get("pressure_hpa"),
+    }
+
+
 def evaluate_from_catch_records(
     location_name: str, today_data: dict, record_list: list[dict]
 ) -> tuple[str, str]:
     """Evaluate today's fishability based on past catch-condition similarity."""
-    target_records = [entry for entry in record_list if entry["location"] == location_name]
+    if not isinstance(today_data, dict):
+        return "データ不足", "本日の天候データを取得できませんでした。"
+    if not isinstance(record_list, list):
+        return "データ不足", "釣果ログを読み込めませんでした。"
+
+    target_records = [
+        entry
+        for entry in record_list
+        if isinstance(entry, dict) and entry.get("location") == location_name
+    ]
     if len(target_records) < 2:
         return "データ不足", "釣果ログが2件以上あると実績ベース評価が有効になります。"
 
