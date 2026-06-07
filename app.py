@@ -22,7 +22,6 @@ from streamlit_folium import st_folium
 from eging_forecast import (
     CATCH_WEATHER_WIND_UNIT_KEY,
     evaluate_from_catch_records,
-    forecast_weather_for_compare,
     get_weather_snapshot,
     normalize_catch_weather_wind,
     rank_color,
@@ -40,6 +39,23 @@ def format_wind_display(wind_mps: float | None) -> str:
     kmh = int(round(mps * 3.6))
     mps_text = f"{mps:g}" if mps != int(mps) else str(int(mps))
     return f"{kmh} km/h（{mps_text} m/s）"
+
+
+def forecast_weather_for_compare(forecast_row: dict) -> dict:
+    """予測結果 dict から実績比較用の気象フィールドだけを取り出す。"""
+    if not isinstance(forecast_row, dict):
+        return {
+            "wind_mps": None,
+            "wave_m": None,
+            "water_temp": None,
+            "pressure_hpa": None,
+        }
+    return {
+        "wind_mps": forecast_row.get("wind_mps"),
+        "wave_m": forecast_row.get("wave_m"),
+        "water_temp": forecast_row.get("water_temp"),
+        "pressure_hpa": forecast_row.get("pressure_hpa"),
+    }
 
 
 def format_point_conditions_markdown(result: dict) -> str:
