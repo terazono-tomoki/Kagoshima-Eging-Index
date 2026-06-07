@@ -2,6 +2,7 @@
 
 from datetime import date, datetime, time
 import json
+import math
 import mimetypes
 from pathlib import Path
 import urllib.error
@@ -21,7 +22,6 @@ from streamlit_folium import st_folium
 
 from eging_forecast import (
     CATCH_WEATHER_WIND_UNIT_KEY,
-    evaluate_from_catch_records,
     get_weather_snapshot,
     normalize_catch_weather_wind,
     rank_color,
@@ -56,6 +56,78 @@ def forecast_weather_for_compare(forecast_row: dict) -> dict:
         "water_temp": forecast_row.get("water_temp"),
         "pressure_hpa": forecast_row.get("pressure_hpa"),
     }
+
+
+def _weather_metric_for_eval(value, fallback: float) -> float:
+    """釣果比較用の気象値を float にする。欠損・不正値は fallback。"""
+    if value is None:
+        return fallback
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    if math.isnan(number):
+        return fallback
+    return number
+
+
+def evaluate_catch_records_for_display(
+    location_name: str, today_data: dict, record_list: list[dict]
+) -> tuple[str, str]:
+    """釣果ログと本日予報の気象類似度を評価する（欠損データでも落ちない）。"""
+    if not isinstance(today_data, dict):
+        return "データ不足", "本日の天候データを取得できませんでした。"
+    if not isinstance(record_list, list):
+        return "データ不足", "釣果ログを読み込めませんでした。"
+
+    target_records = [
+        entry
+        for entry in record_list
+        if isinstance(entry, dict) and entry.get("location") == location_name
+    ]
+    if len(target_records) < 2:
+        return "データ不足", "釣果ログが2件以上あると実績ベース評価が有効になります。"
+
+    today_wind = _weather_metric_for_eval(today_data.get("wind_mps"), 0.0)
+    today_wave = _weather_metric_for_eval(today_data.get("wave_m"), 0.0)
+    today_water_temp = _weather_metric_for_eval(today_data.get("water_temp"), 0.0)
+    today_pressure = _weather_metric_for_eval(today_data.get("pressure_hpa"), 0.0)
+
+    similarities = []
+    for record in target_records:
+        weather = record.get("weather", {})
+        if not isinstance(weather, dict):
+            weather = {}
+        distance = (
+            abs(
+                today_wind
+                - _weather_metric_for_eval(weather.get("wind_mps"), today_wind)
+            )
+            * 1.2
+            + abs(
+                today_wave - _weather_metric_for_eval(weather.get("wave_m"), today_wave)
+            )
+            * 8.0
+            + abs(
+                today_water_temp
+                - _weather_metric_for_eval(weather.get("water_temp"), today_water_temp)
+            )
+            * 1.1
+            + abs(
+                today_pressure
+                - _weather_metric_for_eval(weather.get("pressure_hpa"), today_pressure)
+            )
+            * 0.15
+        )
+        score = max(0.0, 100 - distance * 4.2)
+        similarities.append(score)
+
+    avg_similarity = sum(similarities) / len(similarities)
+    if avg_similarity >= 70:
+        return "実績一致: 高", "過去の釣果が出た気象条件にかなり近いです。"
+    if avg_similarity >= 52:
+        return "実績一致: 中", "過去の釣果条件に部分的に近いです。"
+    return "実績一致: 低", "過去の釣果時コンディションとの差が大きめです。"
 
 
 def format_point_conditions_markdown(result: dict) -> str:
@@ -567,7 +639,7 @@ with tab_catch:
 
         record_items = load_catch_records()
         if isinstance(catch_today_forecast, dict):
-            record_eval_label, record_eval_text = evaluate_from_catch_records(
+            record_eval_label, record_eval_text = evaluate_catch_records_for_display(
                 catch_eval_point,
                 forecast_weather_for_compare(catch_today_forecast),
                 record_items,
