@@ -162,6 +162,16 @@ def get_weather_snapshot(target_coords: list[float], target_dt: datetime) -> dic
     }
 
 
+def _weather_metric(value, fallback: float) -> float:
+    """気象フィールドを float にする。None や不正値は fallback を使う。"""
+    if value is None:
+        return fallback
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
 def evaluate_from_catch_records(
     location_name: str, today_data: dict, record_list: list[dict]
 ) -> tuple[str, str]:
@@ -170,20 +180,27 @@ def evaluate_from_catch_records(
     if len(target_records) < 2:
         return "データ不足", "釣果ログが2件以上あると実績ベース評価が有効になります。"
 
+    today_wind = _weather_metric(today_data.get("wind_mps"), 0.0)
+    today_wave = _weather_metric(today_data.get("wave_m"), 0.0)
+    today_water_temp = _weather_metric(today_data.get("water_temp"), 0.0)
+    today_pressure = _weather_metric(today_data.get("pressure_hpa"), 0.0)
+
     similarities = []
     for record in target_records:
         weather = record.get("weather", {})
+        if not isinstance(weather, dict):
+            weather = {}
         distance = (
-            abs(today_data["wind_mps"] - weather.get("wind_mps", today_data["wind_mps"])) * 1.2
-            + abs(today_data["wave_m"] - weather.get("wave_m", today_data["wave_m"])) * 8.0
+            abs(today_wind - _weather_metric(weather.get("wind_mps"), today_wind)) * 1.2
+            + abs(today_wave - _weather_metric(weather.get("wave_m"), today_wave)) * 8.0
             + abs(
-                today_data["water_temp"]
-                - weather.get("water_temp", today_data["water_temp"])
+                today_water_temp
+                - _weather_metric(weather.get("water_temp"), today_water_temp)
             )
             * 1.1
             + abs(
-                today_data["pressure_hpa"]
-                - weather.get("pressure_hpa", today_data["pressure_hpa"])
+                today_pressure
+                - _weather_metric(weather.get("pressure_hpa"), today_pressure)
             )
             * 0.15
         )
