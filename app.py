@@ -2,7 +2,6 @@
 
 from datetime import date, datetime, time
 import json
-import math
 import mimetypes
 from pathlib import Path
 import urllib.error
@@ -22,9 +21,12 @@ from streamlit_folium import st_folium
 
 from eging_forecast import (
     CATCH_WEATHER_WIND_UNIT_KEY,
+    derive_favorable_conditions,
     get_weather_snapshot,
     normalize_catch_weather_wind,
     rank_color,
+    suggest_best_hours,
+    summarize_best_windows,
     weekly_forecast,
 )
 
@@ -41,95 +43,6 @@ def format_wind_display(wind_mps: float | None) -> str:
     return f"{kmh} km/h（{mps_text} m/s）"
 
 
-def forecast_weather_for_compare(forecast_row: dict) -> dict:
-    """予測結果 dict から実績比較用の気象フィールドだけを取り出す。"""
-    if not isinstance(forecast_row, dict):
-        return {
-            "wind_mps": None,
-            "wave_m": None,
-            "water_temp": None,
-            "pressure_hpa": None,
-        }
-    return {
-        "wind_mps": forecast_row.get("wind_mps"),
-        "wave_m": forecast_row.get("wave_m"),
-        "water_temp": forecast_row.get("water_temp"),
-        "pressure_hpa": forecast_row.get("pressure_hpa"),
-    }
-
-
-def _weather_metric_for_eval(value, fallback: float) -> float:
-    """釣果比較用の気象値を float にする。欠損・不正値は fallback。"""
-    if value is None:
-        return fallback
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return fallback
-    if math.isnan(number):
-        return fallback
-    return number
-
-
-def evaluate_catch_records_for_display(
-    location_name: str, today_data: dict, record_list: list[dict]
-) -> tuple[str, str]:
-    """釣果ログと本日予報の気象類似度を評価する（欠損データでも落ちない）。"""
-    if not isinstance(today_data, dict):
-        return "データ不足", "本日の天候データを取得できませんでした。"
-    if not isinstance(record_list, list):
-        return "データ不足", "釣果ログを読み込めませんでした。"
-
-    target_records = [
-        entry
-        for entry in record_list
-        if isinstance(entry, dict) and entry.get("location") == location_name
-    ]
-    if len(target_records) < 2:
-        return "データ不足", "釣果ログが2件以上あると実績ベース評価が有効になります。"
-
-    today_wind = _weather_metric_for_eval(today_data.get("wind_mps"), 0.0)
-    today_wave = _weather_metric_for_eval(today_data.get("wave_m"), 0.0)
-    today_water_temp = _weather_metric_for_eval(today_data.get("water_temp"), 0.0)
-    today_pressure = _weather_metric_for_eval(today_data.get("pressure_hpa"), 0.0)
-
-    similarities = []
-    for record in target_records:
-        weather = record.get("weather", {})
-        if not isinstance(weather, dict):
-            weather = {}
-        distance = (
-            abs(
-                today_wind
-                - _weather_metric_for_eval(weather.get("wind_mps"), today_wind)
-            )
-            * 1.2
-            + abs(
-                today_wave - _weather_metric_for_eval(weather.get("wave_m"), today_wave)
-            )
-            * 8.0
-            + abs(
-                today_water_temp
-                - _weather_metric_for_eval(weather.get("water_temp"), today_water_temp)
-            )
-            * 1.1
-            + abs(
-                today_pressure
-                - _weather_metric_for_eval(weather.get("pressure_hpa"), today_pressure)
-            )
-            * 0.15
-        )
-        score = max(0.0, 100 - distance * 4.2)
-        similarities.append(score)
-
-    avg_similarity = sum(similarities) / len(similarities)
-    if avg_similarity >= 70:
-        return "実績一致: 高", "過去の釣果が出た気象条件にかなり近いです。"
-    if avg_similarity >= 52:
-        return "実績一致: 中", "過去の釣果条件に部分的に近いです。"
-    return "実績一致: 低", "過去の釣果時コンディションとの差が大きめです。"
-
-
 def format_point_conditions_markdown(result: dict) -> str:
     """本日評価パネル用の潮・風・波・水温サマリー（Markdown）。"""
     tide = result["tide_type"]
@@ -139,20 +52,6 @@ def format_point_conditions_markdown(result: dict) -> str:
     return (
         f"潮: **{tide}** / 風: **{wind}** / "
         f"波: **{wave} m** / 水温: **{water_temp} ℃**"
-    )
-
-
-def today_forecast_for_location(location_name: str, ref_date: date) -> dict | None:
-    """指定ポイントの本日予報を返す。API 取得に失敗したときは None。"""
-    try:
-        forecast_rows = weekly_forecast(location_name, locations, days=7)
-    except (urllib.error.URLError, TimeoutError, ValueError, KeyError):
-        return None
-    if not forecast_rows:
-        return None
-    return next(
-        (fc for fc in forecast_rows if fc["date"] == ref_date),
-        forecast_rows[0],
     )
 
 
@@ -501,7 +400,9 @@ location_options = list(locations.keys())
 if "point_selector" not in st.session_state:
     st.session_state.point_selector = location_options[0]
 
-tab_forecast, tab_catch = st.tabs(["エギング指数・予測", "釣果ログ"])
+tab_forecast, tab_catch, tab_suggest = st.tabs(
+    ["エギング指数・予測", "釣果ログ", "釣れる時間帯提案"]
+)
 
 with tab_forecast:
     st.radio(
@@ -598,7 +499,6 @@ with tab_forecast:
 with tab_catch:
     st.subheader("釣果ログ（写真 + 日時 + 気象）")
     catch_eval_point = st.session_state.get("point_selector", location_options[0])
-    catch_today_forecast = today_forecast_for_location(catch_eval_point, today)
 
     if not RECORDS_SECTION_PASSWORD:
         st.warning(
@@ -638,18 +538,10 @@ with tab_catch:
             st.success(save_notice)
 
         record_items = load_catch_records()
-        if isinstance(catch_today_forecast, dict):
-            record_eval_label, record_eval_text = evaluate_catch_records_for_display(
-                catch_eval_point,
-                forecast_weather_for_compare(catch_today_forecast),
-                record_items,
-            )
-            st.info(
-                f"釣果ログ実績評価（{catch_eval_point}）: "
-                f"{record_eval_label} - {record_eval_text}"
-            )
-        else:
-            st.warning("天候データを取得できないため、釣果ログ実績評価を表示できません。")
+        st.caption(
+            "釣果ログをもとにした「釣れやすい気象条件」と「本日の釣れやすい時間帯」は"
+            "「釣れる時間帯提案」タブでご覧いただけます。"
+        )
         if not _photo_storage_enabled():
             st.caption(
                 "釣果の「行データ」は PostgreSQL に保存されています。"
@@ -945,3 +837,106 @@ with tab_catch:
                             ),
                         )
                     photo_idx += 1
+
+with tab_suggest:
+    st.subheader("釣果ログから探る、釣れる時間帯")
+    suggest_point = st.session_state.get("point_selector", location_options[0])
+    st.caption(
+        f"対象ポイント: {suggest_point}"
+        "（「エギング指数・予測」タブのポイント選択と連動しています）"
+    )
+
+    if not RECORDS_SECTION_PASSWORD or not st.session_state.get("records_auth_unlocked"):
+        st.info(
+            "この機能は釣果ログのデータをもとに算出します。"
+            "「釣果ログ」タブでログインすると表示されます。"
+        )
+    else:
+        suggest_records = load_catch_records()
+        favorable = derive_favorable_conditions(suggest_point, suggest_records)
+
+        if favorable is None:
+            st.info(
+                f"{suggest_point} の釣果ログが各指標2件以上あると、"
+                "釣れやすい条件を分析できます。"
+            )
+        else:
+            st.markdown("#### 過去の釣果から見える「釣れやすい気象条件」")
+            field_labels = {
+                "wind_mps": "風速 (m/s)",
+                "wave_m": "波高 (m)",
+                "water_temp": "水温 (℃)",
+                "pressure_hpa": "気圧 (hPa)",
+            }
+            favorable_rows = [
+                {
+                    "指標": label,
+                    "釣果時の平均": round(favorable[field]["mean"], 1),
+                    "目安レンジ": (
+                        f"{round(favorable[field]['low'], 1)} 〜 "
+                        f"{round(favorable[field]['high'], 1)}"
+                    ),
+                    "サンプル数": favorable[field]["n"],
+                }
+                for field, label in field_labels.items()
+                if field in favorable
+            ]
+            st.dataframe(
+                pd.DataFrame(favorable_rows), use_container_width=True, hide_index=True
+            )
+            st.caption(
+                "目安レンジは釣果ログの平均 ± ばらつき（標準偏差）です。"
+                "件数が少ないうちは参考程度にご覧ください。"
+            )
+
+            st.markdown("#### 本日の時間帯別 釣れやすさ")
+            try:
+                hourly_scores = suggest_best_hours(
+                    suggest_point, locations[suggest_point], today, suggest_records
+                )
+            except (urllib.error.URLError, TimeoutError, ValueError, KeyError) as error:
+                st.error("本日の時間別データを取得できませんでした。")
+                st.exception(error)
+            else:
+                if not hourly_scores:
+                    st.info("時間帯別の提案に必要な釣果ログが不足しています。")
+                else:
+                    windows = summarize_best_windows(hourly_scores)
+                    if windows:
+                        best_window = windows[0]
+                        st.success(
+                            "本日のおすすめ時間帯: "
+                            f"**{best_window['start'].strftime('%H:%M')}〜"
+                            f"{best_window['end'].strftime('%H:%M')}**"
+                            f"（釣果ログとの類似度 平均 {best_window['avg_score']} 点）"
+                        )
+                        if len(windows) > 1:
+                            others = "、".join(
+                                f"{w['start'].strftime('%H:%M')}〜"
+                                f"{w['end'].strftime('%H:%M')}（{w['avg_score']}点）"
+                                for w in windows[1:3]
+                            )
+                            st.caption(f"次点の時間帯: {others}")
+
+                    hourly_df = pd.DataFrame(
+                        [
+                            {
+                                "時刻": row["time"].strftime("%H:%M"),
+                                "釣れやすさスコア": row["score"],
+                                "風": format_wind_display(row["wind_mps"]),
+                                "波(m)": row["wave_m"],
+                                "水温(℃)": row["water_temp"],
+                                "気圧(hPa)": row["pressure_hpa"],
+                            }
+                            for row in hourly_scores
+                        ]
+                    )
+                    st.line_chart(hourly_df.set_index("時刻")["釣れやすさスコア"])
+                    st.dataframe(
+                        hourly_df, use_container_width=True, hide_index=True
+                    )
+                    st.caption(
+                        "※ 釣れやすさスコアは、その時間帯の予報が釣果ログの気象条件に"
+                        "どれだけ近いかをもとにした目安です。潮汐や時合いなど、"
+                        "他の要因も合わせてご判断ください。"
+                    )
