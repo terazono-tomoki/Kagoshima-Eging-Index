@@ -2,8 +2,10 @@
 
 from datetime import date, datetime, time
 import json
+import math
 import mimetypes
 from pathlib import Path
+import statistics
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -21,12 +23,10 @@ from streamlit_folium import st_folium
 
 from eging_forecast import (
     CATCH_WEATHER_WIND_UNIT_KEY,
-    derive_favorable_conditions,
+    fetch_open_meteo_hourly,
     get_weather_snapshot,
     normalize_catch_weather_wind,
     rank_color,
-    suggest_best_hours,
-    summarize_best_windows,
     weekly_forecast,
 )
 
@@ -53,6 +53,192 @@ def format_point_conditions_markdown(result: dict) -> str:
         f"潮: **{tide}** / 風: **{wind}** / "
         f"波: **{wave} m** / 水温: **{water_temp} ℃**"
     )
+
+
+def _weather_metric_for_suggest(value, fallback: float) -> float:
+    """気象値を float にする。欠損・不正値は fallback を使う。"""
+    if value is None:
+        return fallback
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    if math.isnan(number):
+        return fallback
+    return number
+
+
+def _catch_weather_values(
+    location_name: str, record_list: list[dict], field: str
+) -> list[float]:
+    """指定ポイント・指標について、釣果ログに保存された気象値を集める。"""
+    values = []
+    for record in record_list:
+        if not isinstance(record, dict) or record.get("location") != location_name:
+            continue
+        weather = record.get("weather")
+        if not isinstance(weather, dict):
+            continue
+        raw = weather.get(field)
+        if raw is None:
+            continue
+        try:
+            values.append(float(raw))
+        except (TypeError, ValueError):
+            continue
+    return values
+
+
+FAVORABLE_CONDITION_FIELDS = ("wind_mps", "wave_m", "water_temp", "pressure_hpa")
+
+
+def derive_favorable_conditions(
+    location_name: str, record_list: list[dict]
+) -> dict[str, dict] | None:
+    """
+    釣果ログから、そのポイントで釣れた時の気象条件（平均・目安レンジ）を導出する。
+    指標ごとにサンプルが2件未満なら、その指標は結果から除く。
+    全指標が2件未満なら None（分析に使えるデータがない）。
+    """
+    if not isinstance(record_list, list):
+        return None
+
+    stats: dict[str, dict] = {}
+    for field in FAVORABLE_CONDITION_FIELDS:
+        values = _catch_weather_values(location_name, record_list, field)
+        if len(values) < 2:
+            continue
+        mean = statistics.fmean(values)
+        stdev = statistics.pstdev(values)
+        low = mean - stdev
+        if field in ("wind_mps", "wave_m"):
+            low = max(0.0, low)
+        stats[field] = {
+            "mean": mean,
+            "low": low,
+            "high": mean + stdev,
+            "n": len(values),
+        }
+
+    return stats or None
+
+
+def suggest_best_hours(
+    location_name: str,
+    coords: list[float],
+    target_day: date,
+    record_list: list[dict],
+) -> list[dict]:
+    """
+    釣果ログとの気象類似度をもとに、指定日の時間帯ごとの釣れやすさスコアを返す。
+    釣果ログが2件未満、または時間別データが取得できない場合は空リスト。
+    """
+    target_records = [
+        entry
+        for entry in record_list
+        if isinstance(entry, dict)
+        and entry.get("location") == location_name
+        and isinstance(entry.get("weather"), dict)
+    ]
+    if len(target_records) < 2:
+        return []
+
+    hourly = fetch_open_meteo_hourly(coords, target_day)
+    if hourly.empty:
+        return []
+
+    results = []
+    for _, hour_row in hourly.iterrows():
+        hour_metrics = {
+            "wind_mps": float(hour_row["wind_mps"]),
+            "wave_m": float(hour_row["wave_m"]),
+            "water_temp": float(hour_row["water_temp"]),
+            "pressure_hpa": float(hour_row["pressure_hpa"]),
+        }
+        similarities = []
+        for record in target_records:
+            weather = record["weather"]
+            distance = (
+                abs(
+                    hour_metrics["wind_mps"]
+                    - _weather_metric_for_suggest(
+                        weather.get("wind_mps"), hour_metrics["wind_mps"]
+                    )
+                )
+                * 1.2
+                + abs(
+                    hour_metrics["wave_m"]
+                    - _weather_metric_for_suggest(
+                        weather.get("wave_m"), hour_metrics["wave_m"]
+                    )
+                )
+                * 8.0
+                + abs(
+                    hour_metrics["water_temp"]
+                    - _weather_metric_for_suggest(
+                        weather.get("water_temp"), hour_metrics["water_temp"]
+                    )
+                )
+                * 1.1
+                + abs(
+                    hour_metrics["pressure_hpa"]
+                    - _weather_metric_for_suggest(
+                        weather.get("pressure_hpa"), hour_metrics["pressure_hpa"]
+                    )
+                )
+                * 0.15
+            )
+            similarities.append(max(0.0, 100 - distance * 4.2))
+
+        results.append(
+            {
+                "time": hour_row["time"],
+                "score": round(sum(similarities) / len(similarities), 1),
+                "wind_mps": round(hour_metrics["wind_mps"], 1),
+                "wave_m": round(hour_metrics["wave_m"], 2),
+                "water_temp": round(hour_metrics["water_temp"], 1),
+                "pressure_hpa": round(hour_metrics["pressure_hpa"], 1),
+            }
+        )
+    return results
+
+
+def summarize_best_windows(
+    hourly_scores: list[dict], top_fraction: float = 0.3
+) -> list[dict]:
+    """
+    時間帯別スコアの上位帯を連続する時間ごとにまとめ、おすすめ時間帯を返す。
+    スコアの高い順に並べる。
+    """
+    if not hourly_scores:
+        return []
+
+    ranked = sorted(hourly_scores, key=lambda row: row["score"], reverse=True)
+    cutoff_count = max(1, round(len(hourly_scores) * top_fraction))
+    threshold = ranked[cutoff_count - 1]["score"]
+
+    windows: list[list[dict]] = []
+    current: list[dict] = []
+    for row in hourly_scores:
+        if row["score"] >= threshold:
+            current.append(row)
+        else:
+            if current:
+                windows.append(current)
+                current = []
+    if current:
+        windows.append(current)
+
+    summarized = [
+        {
+            "start": window[0]["time"],
+            "end": window[-1]["time"],
+            "avg_score": round(sum(r["score"] for r in window) / len(window), 1),
+        }
+        for window in windows
+    ]
+    summarized.sort(key=lambda w: w["avg_score"], reverse=True)
+    return summarized
 
 
 st.set_page_config(page_title="鹿児島エギング指数", layout="wide")
